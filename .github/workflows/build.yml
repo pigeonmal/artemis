@@ -133,6 +133,13 @@ jobs:
               copy_deps "$lib"
             fi
           done
+
+          # Ensure libcodec2.so.1.0 is present
+          if [ -f /usr/lib/x86_64-linux-gnu/libcodec2.so.1.0 ]; then
+            cp /usr/lib/x86_64-linux-gnu/libcodec2.so.1.0 linux-package/lib/
+          else
+            echo "Warning: libcodec2.so.1.0 not found on build machine"
+          fi
           
           # Create launch script
           cat > linux-package/artemis << 'EOF'
