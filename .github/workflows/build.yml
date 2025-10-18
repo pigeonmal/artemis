@@ -40,7 +40,7 @@ jobs:
             $CONTAINER_IMAGE \
           bash -euxc "
             dnf -y update
-            dnf -y group install 'Development Tools'
+            dnf -y install @development-tools
             dnf -y install \
               git \
               qt6-qtbase-devel qt6-qttools-devel qt6-qtmultimedia-devel \
