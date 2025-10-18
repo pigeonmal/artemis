@@ -431,135 +431,135 @@ jobs:
           
           # Create advanced launch script
           cat > linux-package/artemis << 'EOF'
-#!/bin/bash
-
-# Artemis Desktop Linux Launcher
-# This script ensures all bundled libraries are available and sets up the environment
-
-# Get the directory where this script is located
-if [ -L "${BASH_SOURCE[0]}" ]; then
-    # Script is a symlink, resolve to actual location
-    SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
-else
-    # Script is not a symlink
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-fi
-
-# Set up environment variables
-export LD_LIBRARY_PATH="$SCRIPT_DIR/lib:$LD_LIBRARY_PATH"
-export QT_PLUGIN_PATH="$SCRIPT_DIR/lib/qt6/plugins:$QT_PLUGIN_PATH"
-export QT_QPA_PLATFORM_PLUGIN_PATH="$SCRIPT_DIR/lib/qt6/plugins/platforms"
-
-# Enable hardware acceleration if available
-export QT_XCB_GL_INTEGRATION=xcb_egl
-export QT_QUICK_BACKEND=rhi
-export QT_RHI_BACKEND=opengl
-
-# VAAPI support
-if [ -d "/usr/lib/x86_64-linux-gnu/dri" ]; then
-    export LIBVA_DRIVERS_PATH="/usr/lib/x86_64-linux-gnu/dri:$LIBVA_DRIVERS_PATH"
-fi
-
-# Debug information (can be disabled by setting ARTEMIS_QUIET=1)
-if [ "$ARTEMIS_DEBUG" = "1" ]; then
-    echo "Artemis Desktop Linux Launcher"
-    echo "Script directory: $SCRIPT_DIR"
-    echo "Library path: $LD_LIBRARY_PATH"
-    echo "Qt plugin path: $QT_PLUGIN_PATH"
-    echo ""
-    echo "Checking dependencies..."
-    ldd "$SCRIPT_DIR/bin/artemis" | grep -E "(not found|SDL|opus|ssl|crypto|Qt6)" || true
-    echo ""
-fi
-
-# Launch the application
-exec "$SCRIPT_DIR/bin/artemis" "$@"
-EOF
+          #!/bin/bash
+          
+          # Artemis Desktop Linux Launcher
+          # This script ensures all bundled libraries are available and sets up the environment
+          
+          # Get the directory where this script is located
+          if [ -L "${BASH_SOURCE[0]}" ]; then
+              # Script is a symlink, resolve to actual location
+              SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+          else
+              # Script is not a symlink
+              SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+          fi
+          
+          # Set up environment variables
+          export LD_LIBRARY_PATH="$SCRIPT_DIR/lib:$LD_LIBRARY_PATH"
+          export QT_PLUGIN_PATH="$SCRIPT_DIR/lib/qt6/plugins:$QT_PLUGIN_PATH"
+          export QT_QPA_PLATFORM_PLUGIN_PATH="$SCRIPT_DIR/lib/qt6/plugins/platforms"
+          
+          # Enable hardware acceleration if available
+          export QT_XCB_GL_INTEGRATION=xcb_egl
+          export QT_QUICK_BACKEND=rhi
+          export QT_RHI_BACKEND=opengl
+          
+          # VAAPI support
+          if [ -d "/usr/lib/x86_64-linux-gnu/dri" ]; then
+              export LIBVA_DRIVERS_PATH="/usr/lib/x86_64-linux-gnu/dri:$LIBVA_DRIVERS_PATH"
+          fi
+          
+          # Debug information (can be disabled by setting ARTEMIS_QUIET=1)
+          if [ "$ARTEMIS_DEBUG" = "1" ]; then
+              echo "Artemis Desktop Linux Launcher"
+              echo "Script directory: $SCRIPT_DIR"
+              echo "Library path: $LD_LIBRARY_PATH"
+              echo "Qt plugin path: $QT_PLUGIN_PATH"
+              echo ""
+              echo "Checking dependencies..."
+              ldd "$SCRIPT_DIR/bin/artemis" | grep -E "(not found|SDL|opus|ssl|crypto|Qt6)" || true
+              echo ""
+          fi
+          
+          # Launch the application
+          exec "$SCRIPT_DIR/bin/artemis" "$@"
+          EOF
 
           chmod +x linux-package/artemis
 
           echo "=== Creating installation script ==="
           
           cat > linux-package/install.sh << 'EOF'
-#!/bin/bash
-
-set -e
-
-echo "========================================"
-echo "  Artemis Desktop Linux Installer"
-echo "========================================"
-echo
-
-# Installation directories
-INSTALL_DIR="$HOME/.local/share/artemis-desktop"
-BIN_DIR="$HOME/.local/bin"
-APPLICATIONS_DIR="$HOME/.local/share/applications"
-ICONS_DIR="$HOME/.local/share/icons/hicolor"
-
-echo "Installing to: $INSTALL_DIR"
-
-# Create directories
-mkdir -p "$INSTALL_DIR" "$BIN_DIR" "$APPLICATIONS_DIR"
-mkdir -p "$ICONS_DIR/256x256/apps" "$ICONS_DIR/scalable/apps"
-
-# Copy all files
-echo "Copying application files..."
-cp -r ./* "$INSTALL_DIR/"
-
-# Create symlink to launcher in PATH
-echo "Creating launcher symlink..."
-ln -sf "$INSTALL_DIR/artemis" "$BIN_DIR/artemis"
-
-# Install desktop entry
-echo "Installing desktop entry..."
-cat > "$APPLICATIONS_DIR/artemis-desktop.desktop" << 'EOD'
-[Desktop Entry]
-Type=Application
-Name=Artemis Desktop
-Comment=Game streaming client with comprehensive codec support
-Exec=artemis
-Icon=artemis-desktop
-Categories=Game;Network;AudioVideo;
-Keywords=gaming;streaming;nvidia;gamestream;sunshine;codec;
-StartupNotify=true
-MimeType=x-scheme-handler/artemis;
-EOD
-
-# Copy icons if they exist
-if [ -f "$INSTALL_DIR/share/icons/hicolor/256x256/apps/artemis.png" ]; then
-    cp "$INSTALL_DIR/share/icons/hicolor/256x256/apps/artemis.png" "$ICONS_DIR/256x256/apps/artemis-desktop.png"
-fi
-
-if [ -f "$INSTALL_DIR/share/icons/hicolor/scalable/apps/artemis.svg" ]; then
-    cp "$INSTALL_DIR/share/icons/hicolor/scalable/apps/artemis.svg" "$ICONS_DIR/scalable/apps/artemis-desktop.svg"
-fi
-
-# Update desktop database
-if command -v update-desktop-database >/dev/null 2>&1; then
-    update-desktop-database "$APPLICATIONS_DIR" 2>/dev/null || true
-fi
-
-# Update icon cache
-if command -v gtk-update-icon-cache >/dev/null 2>&1; then
-    gtk-update-icon-cache "$ICONS_DIR" 2>/dev/null || true
-fi
-
-echo
-echo "========================================"
-echo "  Installation Complete!"
-echo "========================================"
-echo
-echo "You can now run Artemis Desktop by:"
-echo "  1. Running 'artemis' from terminal"
-echo "  2. Finding it in your applications menu"
-echo
-echo "If the 'artemis' command is not found,"
-echo "add ~/.local/bin to your PATH:"
-echo "  export PATH=\"\$HOME/.local/bin:\$PATH\""
-echo
-echo "For debugging, run: ARTEMIS_DEBUG=1 artemis"
-echo
-EOF
+          #!/bin/bash
+          
+          set -e
+          
+          echo "========================================"
+          echo "  Artemis Desktop Linux Installer"
+          echo "========================================"
+          echo
+          
+          # Installation directories
+          INSTALL_DIR="$HOME/.local/share/artemis-desktop"
+          BIN_DIR="$HOME/.local/bin"
+          APPLICATIONS_DIR="$HOME/.local/share/applications"
+          ICONS_DIR="$HOME/.local/share/icons/hicolor"
+          
+          echo "Installing to: $INSTALL_DIR"
+          
+          # Create directories
+          mkdir -p "$INSTALL_DIR" "$BIN_DIR" "$APPLICATIONS_DIR"
+          mkdir -p "$ICONS_DIR/256x256/apps" "$ICONS_DIR/scalable/apps"
+          
+          # Copy all files
+          echo "Copying application files..."
+          cp -r ./* "$INSTALL_DIR/"
+          
+          # Create symlink to launcher in PATH
+          echo "Creating launcher symlink..."
+          ln -sf "$INSTALL_DIR/artemis" "$BIN_DIR/artemis"
+          
+          # Install desktop entry
+          echo "Installing desktop entry..."
+          cat > "$APPLICATIONS_DIR/artemis-desktop.desktop" << 'EOD'
+          [Desktop Entry]
+          Type=Application
+          Name=Artemis Desktop
+          Comment=Game streaming client with comprehensive codec support
+          Exec=artemis
+          Icon=artemis-desktop
+          Categories=Game;Network;AudioVideo;
+          Keywords=gaming;streaming;nvidia;gamestream;sunshine;codec;
+          StartupNotify=true
+          MimeType=x-scheme-handler/artemis;
+          EOD
+          
+          # Copy icons if they exist
+          if [ -f "$INSTALL_DIR/share/icons/hicolor/256x256/apps/artemis.png" ]; then
+              cp "$INSTALL_DIR/share/icons/hicolor/256x256/apps/artemis.png" "$ICONS_DIR/256x256/apps/artemis-desktop.png"
+          fi
+          
+          if [ -f "$INSTALL_DIR/share/icons/hicolor/scalable/apps/artemis.svg" ]; then
+              cp "$INSTALL_DIR/share/icons/hicolor/scalable/apps/artemis.svg" "$ICONS_DIR/scalable/apps/artemis-desktop.svg"
+          fi
+          
+          # Update desktop database
+          if command -v update-desktop-database >/dev/null 2>&1; then
+              update-desktop-database "$APPLICATIONS_DIR" 2>/dev/null || true
+          fi
+          
+          # Update icon cache
+          if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+              gtk-update-icon-cache "$ICONS_DIR" 2>/dev/null || true
+          fi
+          
+          echo
+          echo "========================================"
+          echo "  Installation Complete!"
+          echo "========================================"
+          echo
+          echo "You can now run Artemis Desktop by:"
+          echo "  1. Running 'artemis' from terminal"
+          echo "  2. Finding it in your applications menu"
+          echo
+          echo "If the 'artemis' command is not found,"
+          echo "add ~/.local/bin to your PATH:"
+          echo "  export PATH=\"\$HOME/.local/bin:\$PATH\""
+          echo
+          echo "For debugging, run: ARTEMIS_DEBUG=1 artemis"
+          echo
+          EOF
 
           chmod +x linux-package/install.sh
 
@@ -567,149 +567,149 @@ EOF
           
           # Create comprehensive README
           cat > linux-package/README.md << 'EOF'
-# Artemis Desktop - Linux Distribution
-
-This is a complete, self-contained Linux distribution of Artemis Desktop with all necessary dependencies bundled.
-
-## Features
-
-- **Complete Dependency Bundle**: All required libraries included
-- **Hardware Acceleration**: VA-API, VDPAU, and OpenGL support
-- **Comprehensive Codec Support**: H.264, H.265, AV1, and more
-- **Audio Support**: Multiple audio backends (ALSA, PulseAudio, JACK)
-- **Cross-Distribution Compatibility**: Works on most modern Linux distributions
-
-## Quick Installation
-
-1. Extract this archive to any location
-2. Run the installer: `./install.sh`
-3. Launch from terminal: `artemis`
-
-## Manual Installation
-
-1. Run directly: `./artemis`
-2. Or copy to your preferred location and run from there
-
-## System Requirements
-
-- Linux x86_64 (64-bit)
-- OpenGL 3.0+ support (for best performance)
-- Modern Linux distribution (Ubuntu 18.04+, Fedora 30+, etc.)
-
-## Troubleshooting
-
-### Missing Libraries
-If you encounter library errors, your system may be missing some base libraries:
-
-```bash
-# Ubuntu/Debian:
-sudo apt install libgl1-mesa-glx libegl1-mesa libxcb1
-
-# Fedora/RHEL:
-sudo dnf install mesa-libGL mesa-libEGL libxcb
-
-# Arch Linux:
-sudo pacman -S mesa libxcb
-```
-
-### Hardware Acceleration
-For optimal performance, ensure your graphics drivers are properly installed:
-
-- **NVIDIA**: Install proprietary drivers via your distribution's package manager
-- **AMD**: Mesa drivers (usually pre-installed)
-- **Intel**: Mesa drivers (usually pre-installed)
-
-### Audio Issues
-If you experience audio problems:
-
-1. Check that PulseAudio or ALSA is running
-2. Verify audio permissions for your user
-3. Try running: `ARTEMIS_DEBUG=1 artemis` for diagnostic information
-
-### Debug Mode
-Run with debug information:
-```bash
-ARTEMIS_DEBUG=1 artemis
-```
-
-## Uninstallation
-
-If installed via `install.sh`:
-
-```bash
-rm -rf ~/.local/share/artemis-desktop
-rm -f ~/.local/bin/artemis
-rm -f ~/.local/share/applications/artemis-desktop.desktop
-```
-
-## Support
-
-For issues specific to this Linux distribution, please check:
-1. The bundled library list in `library_info.txt`
-2. Your system's OpenGL and driver status
-3. Audio system configuration
-EOF
+          # Artemis Desktop - Linux Distribution
+          
+          This is a complete, self-contained Linux distribution of Artemis Desktop with all necessary dependencies bundled.
+          
+          ## Features
+          
+          - **Complete Dependency Bundle**: All required libraries included
+          - **Hardware Acceleration**: VA-API, VDPAU, and OpenGL support
+          - **Comprehensive Codec Support**: H.264, H.265, AV1, and more
+          - **Audio Support**: Multiple audio backends (ALSA, PulseAudio, JACK)
+          - **Cross-Distribution Compatibility**: Works on most modern Linux distributions
+          
+          ## Quick Installation
+          
+          1. Extract this archive to any location
+          2. Run the installer: `./install.sh`
+          3. Launch from terminal: `artemis`
+          
+          ## Manual Installation
+          
+          1. Run directly: `./artemis`
+          2. Or copy to your preferred location and run from there
+          
+          ## System Requirements
+          
+          - Linux x86_64 (64-bit)
+          - OpenGL 3.0+ support (for best performance)
+          - Modern Linux distribution (Ubuntu 18.04+, Fedora 30+, etc.)
+          
+          ## Troubleshooting
+          
+          ### Missing Libraries
+          If you encounter library errors, your system may be missing some base libraries:
+          
+          ```bash
+          # Ubuntu/Debian:
+          sudo apt install libgl1-mesa-glx libegl1-mesa libxcb1
+          
+          # Fedora/RHEL:
+          sudo dnf install mesa-libGL mesa-libEGL libxcb
+          
+          # Arch Linux:
+          sudo pacman -S mesa libxcb
+          ```
+          
+          ### Hardware Acceleration
+          For optimal performance, ensure your graphics drivers are properly installed:
+          
+          - **NVIDIA**: Install proprietary drivers via your distribution's package manager
+          - **AMD**: Mesa drivers (usually pre-installed)
+          - **Intel**: Mesa drivers (usually pre-installed)
+          
+          ### Audio Issues
+          If you experience audio problems:
+          
+          1. Check that PulseAudio or ALSA is running
+          2. Verify audio permissions for your user
+          3. Try running: `ARTEMIS_DEBUG=1 artemis` for diagnostic information
+          
+          ### Debug Mode
+          Run with debug information:
+          ```bash
+          ARTEMIS_DEBUG=1 artemis
+          ```
+          
+          ## Uninstallation
+          
+          If installed via `install.sh`:
+          
+          ```bash
+          rm -rf ~/.local/share/artemis-desktop
+          rm -f ~/.local/bin/artemis
+          rm -f ~/.local/share/applications/artemis-desktop.desktop
+          ```
+          
+          ## Support
+          
+          For issues specific to this Linux distribution, please check:
+          1. The bundled library list in `library_info.txt`
+          2. Your system's OpenGL and driver status
+          3. Audio system configuration
+          EOF
 
           # Create build and library information
           cat > linux-package/build_info.txt << EOF
-Artemis Desktop - Complete Linux Build
-=====================================
-
-Version: $VERSION
-Numeric Version: ${{ needs.setup-version.outputs.numeric_version }}
-Is Prerelease: ${{ needs.setup-version.outputs.is_prerelease }}
-Branch: ${{ github.ref_name }}
-Commit: ${{ github.sha }}
-Built: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
-Qt Version: ${{ env.QT_VERSION }}
-
-Architecture: x86_64 (64-bit)
-Build Host: $(uname -a)
-Compiler: $(gcc --version | head -1)
-
-Bundled Libraries:
-==================
-$(ls -la linux-package/lib/ | tail -n +2)
-
-System Dependencies at Build Time:
-==================================
-$(ldd app/artemis)
-
-Hardware Acceleration Support:
-=============================
-- VA-API: Yes (if system drivers available)
-- VDPAU: Yes (if system drivers available)
-- OpenGL: Yes
-- Vulkan: System dependent
-
-Codec Support:
-=============
-- H.264: Yes
-- H.265/HEVC: Yes
-- AV1: Yes (if libdav1d available)
-- VP8/VP9: Yes
-- Audio: Opus, AAC, MP3, Vorbis
-
-Audio Backends:
-==============
-- ALSA: Yes
-- PulseAudio: Yes
-- JACK: Yes (if available)
-- SDL2 Audio: Yes
-
-Network Features:
-================
-- SSL/TLS: Yes (bundled)
-- mDNS: Yes
-
-Installation Options:
-====================
-1. Automated: Run ./install.sh
-2. Manual: Run ./artemis directly
-3. Portable: Copy entire folder anywhere
-
-For support and updates, visit the project repository.
-EOF
+          Artemis Desktop - Complete Linux Build
+          =====================================
+          
+          Version: $VERSION
+          Numeric Version: ${{ needs.setup-version.outputs.numeric_version }}
+          Is Prerelease: ${{ needs.setup-version.outputs.is_prerelease }}
+          Branch: ${{ github.ref_name }}
+          Commit: ${{ github.sha }}
+          Built: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+          Qt Version: ${{ env.QT_VERSION }}
+          
+          Architecture: x86_64 (64-bit)
+          Build Host: $(uname -a)
+          Compiler: $(gcc --version | head -1)
+          
+          Bundled Libraries:
+          ==================
+          $(ls -la linux-package/lib/ | tail -n +2)
+          
+          System Dependencies at Build Time:
+          ==================================
+          $(ldd app/artemis)
+          
+          Hardware Acceleration Support:
+          =============================
+          - VA-API: Yes (if system drivers available)
+          - VDPAU: Yes (if system drivers available)
+          - OpenGL: Yes
+          - Vulkan: System dependent
+          
+          Codec Support:
+          =============
+          - H.264: Yes
+          - H.265/HEVC: Yes
+          - AV1: Yes (if libdav1d available)
+          - VP8/VP9: Yes
+          - Audio: Opus, AAC, MP3, Vorbis
+          
+          Audio Backends:
+          ==============
+          - ALSA: Yes
+          - PulseAudio: Yes
+          - JACK: Yes (if available)
+          - SDL2 Audio: Yes
+          
+          Network Features:
+          ================
+          - SSL/TLS: Yes (bundled)
+          - mDNS: Yes
+          
+          Installation Options:
+          ====================
+          1. Automated: Run ./install.sh
+          2. Manual: Run ./artemis directly
+          3. Portable: Copy entire folder anywhere
+          
+          For support and updates, visit the project repository.
+          EOF
 
           # Create library info file
           echo "=== Library Information ===" > linux-package/library_info.txt
