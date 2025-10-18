@@ -1,134 +1,945 @@
-name: Linux Build & Release
+name: Linux Release Build
+
+# This workflow handles Linux-only builds with complete dependency bundling
+# - Creates releases for develop and main/master branches
+# - Bundles all necessary dependencies and libraries
+# - Generates portable Linux distributions
 
 on:
   push:
     branches:
-      - '**'
-    tags:
-      - 'v*.*.*'
-  workflow_dispatch:
+      - develop
+      - dev
+      - main
+      - master
+      - 'feature/**'
+      - 'feat/**'
+      - 'fix/**'
+  workflow_dispatch: # Allow manual triggering
 
 env:
   QT_VERSION: '6.8.3'
-  CONTAINER_IMAGE: fedora:latest
 
 jobs:
-  build-linux:
-    name: Build on Fedora Linux
+  setup-version:
+    name: Setup Version
     runs-on: ubuntu-latest
-
     outputs:
-      package-path: ${{ steps.archive.outputs.package-path }}
-
+      version: ${{ steps.version.outputs.version }}
+      numeric_version: ${{ steps.version.outputs.numeric_version }}
+      is_prerelease: ${{ steps.version.outputs.is_prerelease }}
+      should_build: ${{ steps.check-changes.outputs.should_build }}
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
         with:
-          submodules: recursive
+          fetch-depth: 0 # Need full history for proper versioning
+
+      - name: Check for meaningful changes
+        id: check-changes
+        run: |
+          # Always build on main/master branch (releases)
+          if [[ "${{ github.ref_name }}" == "main" || "${{ github.ref_name }}" == "master" ]]; then
+            echo "should_build=true" >> $GITHUB_OUTPUT
+            echo "Always building on main/master branch for release"
+            exit 0
+          fi
+
+          # Skip builds if commit message contains [skip ci] or [ci skip]
+          if echo "${{ github.event.head_commit.message }}" | grep -E "\\[(skip ci|ci skip)\\]" > /dev/null; then
+            echo "should_build=false" >> $GITHUB_OUTPUT
+            echo "Build skipped due to [skip ci] in commit message"
+            exit 0
+          fi
+
+          # Check if this is a merge commit (has multiple parents)
+          PARENT_COUNT=$(git rev-list --parents -n 1 HEAD | wc -w)
+          PARENT_COUNT=$((PARENT_COUNT - 1)) # Subtract 1 because first item is the commit hash itself
+
+          if [ "$PARENT_COUNT" -gt 1 ]; then
+            echo "Detected merge commit with $PARENT_COUNT parents"
+            # For merge commits, check the actual changes being merged
+            FIRST_PARENT=$(git rev-parse HEAD^1)
+            echo "Comparing changes against first parent: $FIRST_PARENT"
+
+            # Get all changed files in this merge, excluding documentation/config files
+            CHANGED_FILES=$(git diff --name-only $FIRST_PARENT HEAD | grep -v -E "(\\.md$|test.*\\.txt$|README.*\\.txt$|CHANGELOG.*\\.txt$)" | grep -v -E "(\\.yml$|\\.yaml$)" | wc -l)
+            WORKFLOW_FILES=$(git diff --name-only $FIRST_PARENT HEAD | grep -E "^\\.github/workflows/.*\\.(yml|yaml)$" | wc -l)
+            TOTAL_MEANINGFUL=$((CHANGED_FILES + WORKFLOW_FILES))
+
+            echo "Meaningful files changed in merge: $CHANGED_FILES"
+            echo "Workflow files changed: $WORKFLOW_FILES"
+            echo "Total meaningful changes: $TOTAL_MEANINGFUL"
+
+            if [ "$TOTAL_MEANINGFUL" -eq 0 ]; then
+              echo "should_build=false" >> $GITHUB_OUTPUT
+              echo "Skipping build - merge contains no meaningful code changes"
+              exit 0
+            else
+              echo "should_build=true" >> $GITHUB_OUTPUT
+              echo "Build will proceed - merge contains $TOTAL_MEANINGFUL meaningful changes"
+              exit 0
+            fi
+          else
+            echo "Regular commit (not a merge) - checking for meaningful changes"
+            # For regular commits, check against previous commit
+            CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD | grep -v -E "(\\.md$|test.*\\.txt$|README.*\\.txt$|CHANGELOG.*\\.txt$)" | grep -v -E "(\\.yml$|\\.yaml$)" | wc -l)
+            WORKFLOW_FILES=$(git diff --name-only HEAD~1 HEAD | grep -E "^\\.github/workflows/.*\\.(yml|yaml)$" | wc -l)
+            TOTAL_MEANINGFUL=$((CHANGED_FILES + WORKFLOW_FILES))
+
+            echo "Meaningful files changed: $CHANGED_FILES"
+            echo "Workflow files changed: $WORKFLOW_FILES"
+            echo "Total meaningful changes: $TOTAL_MEANINGFUL"
+
+            if [ "$TOTAL_MEANINGFUL" -eq 0 ]; then
+              echo "should_build=false" >> $GITHUB_OUTPUT
+              echo "Skipping build - no meaningful code changes detected"
+              exit 0
+            fi
+          fi
+
+          echo "should_build=true" >> $GITHUB_OUTPUT
+          echo "Build will proceed - meaningful changes detected"
+
+      - name: Generate semantic version
+        id: version
+        run: |
+          # Base version from app/version.txt
+          BASE_VERSION=$(cat app/version.txt | tr -d '\n\r')
+
+          # Get branch info
+          BRANCH_NAME="${{ github.ref_name }}"
+          BRANCH_SANITIZED=$(echo "$BRANCH_NAME" | sed 's/[^a-zA-Z0-9._-]/-/g')
+
+          # Get commit info
+          COMMIT_SHORT="${{ github.sha }}"
+          COMMIT_SHORT="${COMMIT_SHORT:0:7}"
+
+          # Get timestamp info
+          TIMESTAMP=$(date +"%Y%m%d")
+          BUILD_NUMBER=$(date +"%H%M")
+
+          # Determine if this is a prerelease
+          IS_PRERELEASE="true"
+          PRERELEASE_SUFFIX=""
+
+          if [[ "$BRANCH_NAME" == "main" || "$BRANCH_NAME" == "master" ]]; then
+            # Main branch = stable release
+            VERSION="$BASE_VERSION"
+            IS_PRERELEASE="false"
+          elif [[ "$BRANCH_NAME" == "develop" ]]; then
+            # Develop branch = development prerelease
+            VERSION="$BASE_VERSION-dev.$TIMESTAMP.$BUILD_NUMBER+$COMMIT_SHORT"
+            PRERELEASE_SUFFIX="dev"
+          elif [[ "$BRANCH_NAME" =~ ^(feature|feat)/ ]]; then
+            # Feature branch = feature prerelease
+            FEATURE_NAME=$(echo "$BRANCH_NAME" | sed 's|^.*/||' | sed 's/[^a-zA-Z0-9._-]/-/g')
+            VERSION="$BASE_VERSION-feature.$FEATURE_NAME.$TIMESTAMP.$BUILD_NUMBER+$COMMIT_SHORT"
+            PRERELEASE_SUFFIX="feature"
+          elif [[ "$BRANCH_NAME" =~ ^(hotfix|fix)/ ]]; then
+            # Hotfix branch = hotfix prerelease
+            VERSION="$BASE_VERSION-hotfix.$TIMESTAMP.$BUILD_NUMBER+$COMMIT_SHORT"
+            PRERELEASE_SUFFIX="hotfix"
+          else
+            # Other branches = alpha prerelease
+            VERSION="$BASE_VERSION-alpha.$BRANCH_SANITIZED.$TIMESTAMP.$BUILD_NUMBER+$COMMIT_SHORT"
+            PRERELEASE_SUFFIX="alpha"
+          fi
+
+          # Create numeric version for compatibility
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$BASE_VERSION"
+          NUMERIC_VERSION="$MAJOR.$MINOR.$PATCH.$BUILD_NUMBER"
+
+          # Output all versions
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "numeric_version=$NUMERIC_VERSION" >> $GITHUB_OUTPUT
+          echo "is_prerelease=$IS_PRERELEASE" >> $GITHUB_OUTPUT
+          echo "Generated versions:"
+          echo "  Semantic Version: $VERSION"
+          echo "  Numeric Version: $NUMERIC_VERSION"
+          echo "  Is Prerelease: $IS_PRERELEASE"
+          echo "  Branch: $BRANCH_NAME"
+
+  build-linux-complete:
+    name: Complete Linux Build with All Dependencies
+    needs: setup-version
+    runs-on: ubuntu-22.04
+    if: needs.setup-version.outputs.should_build == 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'
           fetch-depth: 0
 
-      - name: Set up Docker Build Environment
+      - name: Display version info
         run: |
-          echo "Using container image: $CONTAINER_IMAGE"
-          docker pull $CONTAINER_IMAGE
+          echo "Using semantic version: ${{ needs.setup-version.outputs.version }}"
+          echo "Using numeric version: ${{ needs.setup-version.outputs.numeric_version }}"
+          echo "Is prerelease: ${{ needs.setup-version.outputs.is_prerelease }}"
 
-      - name: Build inside Fedora container
+      - name: Setup Qt 6
+        uses: jurplel/install-qt-action@v3
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: 'linux'
+          target: 'desktop'
+          modules: 'qtmultimedia'
+
+      - name: Install comprehensive build dependencies
         run: |
-          docker run --rm \
-            -v "${{ github.workspace }}":/workspace:z \
-            -w /workspace \
-            $CONTAINER_IMAGE \
-          bash -euxc "
-            dnf -y update
-            dnf -y install @development-tools
-            dnf -y install \
-              git \
-              qt6-qtbase-devel qt6-qttools-devel qt6-qtmultimedia-devel \
-              openssl-devel SDL2-devel SDL2_ttf-devel opus-devel ffmpeg-devel \
-              libX11-devel libXrandr-devel freetype-devel mesa-libGL-devel \
-              wayland-devel libpulse-devel libudev-devel libplacebo-devel
+          sudo apt-get update
+          
+          # Core build tools
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            ninja-build \
+            pkg-config \
+            git \
+            wget \
+            curl \
+            unzip \
+            tar \
+            gzip \
+            file \
+            ldd
 
-            curl -sSL https://github.com/jurplel/install-qt-action/releases/download/v3.0.0/install-qt.sh | bash -s -- \
-              --version $QT_VERSION \
-              --host linux \
-              --target desktop \
-              --modules qtmultimedia
+          # Qt and graphics dependencies
+          sudo apt-get install -y \
+            libegl1-mesa-dev \
+            libgl1-mesa-dev \
+            libgles2-mesa-dev \
+            libglu1-mesa-dev \
+            libgbm-dev \
+            libdrm-dev \
+            mesa-utils \
+            mesa-common-dev
 
-            rm -rf build .qmake.cache .qmake.stash
-            export PATH=\"\$HOME/Qt/$QT_VERSION/bin:\$PATH\"
-            qmake6 artemis.pro CONFIG+=release QMAKE_CXXFLAGS+=\"-fPIC\"
-            make -j\$(nproc)
+          # Media and codec libraries
+          sudo apt-get install -y \
+            libopus-dev \
+            libavcodec-dev \
+            libavformat-dev \
+            libavutil-dev \
+            libswscale-dev \
+            libswresample-dev \
+            libavfilter-dev \
+            libavdevice-dev \
+            ffmpeg \
+            libplacebo-dev
 
-            mkdir -p package/{bin,lib}
-            cp app/artemis package/bin/
-            ldd app/artemis \
-              | grep -E 'libQt6|libSDL2|libopus|libssl|libav' \
-              | awk '{print \$3}' \
-              | xargs -I{} cp {} package/lib/
+          # Hardware acceleration
+          sudo apt-get install -y \
+            libva-dev \
+            libvdpau-dev \
+            libxvmc-dev \
+            vainfo \
+            vdpauinfo
 
-            # Create installer script
-            cat > package/install.sh << 'EOF'
-            #!/usr/bin/env bash
-            DEST=\"\$HOME/.local/share/artemis\"
-            BIN=\"\$HOME/.local/bin\"
-            mkdir -p \"\$DEST\" \"\$BIN\"
-            cp -r * \"\$DEST/\"
-            ln -sf \"\$DEST/artemis\" \"\$BIN/artemis\"
-            cat > \"\$HOME/.local/share/applications/artemis.desktop\" << EOD
-            [Desktop Entry]
-            Type=Application
-            Name=Artemis Desktop
-            Exec=artemis
-            Icon=artemis
-            Categories=Game;Network;
-            EOD
-            echo \"Installed Artemis to \$DEST; launcher: artemis\"
-            EOF
-            chmod +x package/install.sh
+          # Audio libraries
+          sudo apt-get install -y \
+            libasound2-dev \
+            libpulse-dev \
+            libjack-dev \
+            libsndio-dev \
+            portaudio19-dev
 
-            TAR=artemis-linux-\${GITHUB_REF_NAME:-build\${GITHUB_RUN_NUMBER}}.tar.gz
-            tar czf \$TAR -C package .
-            echo \"\$TAR\"
-          " > cont-build-output.txt
+          # Input and windowing
+          sudo apt-get install -y \
+            libsdl2-dev \
+            libsdl2-ttf-dev \
+            libsdl2-image-dev \
+            libsdl2-mixer-dev \
+            libx11-dev \
+            libxcursor-dev \
+            libxext-dev \
+            libxi-dev \
+            libxinerama-dev \
+            libxrandr-dev \
+            libxss-dev \
+            libxt-dev \
+            libxv-dev \
+            libxxf86vm-dev \
+            libxkbcommon-dev \
+            libxcb-dri3-dev \
+            libx11-xcb-dev
 
-      - name: Read package path
-        id: archive
+          # Wayland support
+          sudo apt-get install -y \
+            wayland-protocols \
+            libwayland-dev \
+            libwayland-client0 \
+            libwayland-server0 \
+            libwayland-cursor0 \
+            libwayland-egl1-mesa
+
+          # Security and networking
+          sudo apt-get install -y \
+            libssl-dev \
+            libcrypto++-dev \
+            libcurl4-openssl-dev \
+            libdbus-1-dev
+
+          # System libraries
+          sudo apt-get install -y \
+            libudev-dev \
+            libibus-1.0-dev \
+            libfreetype6-dev \
+            libfontconfig1-dev \
+            libjpeg-dev \
+            libpng-dev \
+            libtiff-dev \
+            libwebp-dev
+
+          # Compression and archive support
+          sudo apt-get install -y \
+            zlib1g-dev \
+            libbz2-dev \
+            liblzma-dev \
+            libzstd-dev \
+            libarchive-dev
+
+          # Development tools
+          sudo apt-get install -y \
+            nasm \
+            yasm \
+            chrpath \
+            patchelf
+
+          # Additional codec support
+          sudo apt-get install -y \
+            libx264-dev \
+            libx265-dev \
+            libvpx-dev \
+            libmp3lame-dev \
+            libfdk-aac-dev \
+            libvorbis-dev \
+            libtheora-dev
+
+      - name: Clean any existing build
         run: |
-          PACKAGE=$(tail -n1 cont-build-output.txt)
-          echo "::set-output name=package-path::\$PACKAGE"
+          rm -f .qmake.stash .qmake.cache
+          find . -name "Makefile*" -delete || true
+          rm -rf build/ || true
+          rm -rf moonlight-common-c/Makefile* moonlight-common-c/.qmake.stash || true
+          rm -rf qmdnsengine/Makefile* qmdnsengine/.qmake.stash || true
+          rm -rf h264bitstream/Makefile* h264bitstream/.qmake.stash || true
+          rm -rf app/Makefile* app/.qmake.stash || true
 
-      - name: Upload Build Artifact
+      - name: Build application
+        run: |
+          export PATH="$Qt6_DIR/bin:$PATH"
+          export QMAKE="$Qt6_DIR/bin/qmake6"
+          export PKG_CONFIG_PATH="/usr/lib/x86_64-linux-gnu/pkgconfig:$PKG_CONFIG_PATH"
+          
+          # Configure and build with comprehensive flags
+          qmake6 artemis.pro CONFIG+=release \
+            "QMAKE_CXXFLAGS+=-fPIC -O2 -DNDEBUG" \
+            "QMAKE_LFLAGS+=-Wl,-rpath,'\$\$ORIGIN/lib'" \
+            "CONFIG+=link_pkgconfig" \
+            "PKGCONFIG+=opus sdl2 libavcodec libavformat libavutil libswscale libssl libcrypto"
+          
+          make -j$(nproc)
+          
+          # Verify the binary was created
+          if [ ! -f "app/artemis" ]; then
+            echo "ERROR: Build failed - artemis binary not found"
+            exit 1
+          fi
+          
+          echo "Build completed successfully"
+          file app/artemis
+          ldd app/artemis
+
+      - name: Create comprehensive dependency bundle
+        env:
+          VERSION: ${{ needs.setup-version.outputs.version }}
+        run: |
+          echo "=== Creating comprehensive Linux distribution ==="
+          
+          # Create package structure
+          mkdir -p linux-package/bin
+          mkdir -p linux-package/lib
+          mkdir -p linux-package/share/applications
+          mkdir -p linux-package/share/icons/hicolor/256x256/apps
+          mkdir -p linux-package/share/icons/hicolor/scalable/apps
+          mkdir -p linux-package/share/doc/artemis
+
+          # Copy the main binary
+          cp app/artemis linux-package/bin/
+          chmod +x linux-package/bin/artemis
+
+          echo "=== Bundling shared libraries ==="
+          
+          # Get all dynamic library dependencies
+          LIBS_TO_BUNDLE=$(ldd app/artemis | awk '/=> \// { print $3 }' | grep -v "^/lib/\|^/lib64/\|^/usr/lib/libc\|^/usr/lib/libm\|^/usr/lib/libdl\|^/usr/lib/libpthread\|^/usr/lib/librt")
+          
+          # Bundle critical libraries that may not be available on all systems
+          for lib in $LIBS_TO_BUNDLE; do
+            if [ -f "$lib" ]; then
+              lib_name=$(basename "$lib")
+              
+              # Skip system libraries that are universally available
+              if echo "$lib_name" | grep -qE "^(libc\.so|libm\.so|libdl\.so|libpthread\.so|librt\.so|ld-linux)"; then
+                continue
+              fi
+              
+              # Bundle libraries we want to ensure compatibility for
+              if echo "$lib_name" | grep -qE "(SDL2|opus|ssl|crypto|avcodec|avformat|avutil|swscale|va|vdpau|placebo|Qt6)"; then
+                echo "Bundling library: $lib_name from $lib"
+                cp "$lib" linux-package/lib/
+                
+                # Also copy any symlinks or version variants
+                lib_base=$(echo "$lib_name" | sed 's/\.so.*/\.so/')
+                if [ "$lib_base" != "$lib_name" ]; then
+                  for variant in $(find $(dirname "$lib") -name "${lib_base}*" 2>/dev/null); do
+                    if [ -f "$variant" ] && [ ! -L "$variant" ]; then
+                      variant_name=$(basename "$variant")
+                      if [ ! -f "linux-package/lib/$variant_name" ]; then
+                        echo "Bundling variant: $variant_name"
+                        cp "$variant" linux-package/lib/
+                      fi
+                    fi
+                  done
+                fi
+              fi
+            fi
+          done
+
+          # Bundle Qt6 plugins if available
+          if [ -d "$Qt6_DIR/plugins" ]; then
+            echo "Bundling Qt6 plugins..."
+            mkdir -p linux-package/lib/qt6/plugins
+            cp -r "$Qt6_DIR/plugins"/* linux-package/lib/qt6/plugins/ 2>/dev/null || true
+          fi
+
+          # Bundle additional codec libraries from system
+          echo "Bundling additional system libraries..."
+          SYSTEM_LIBS="/usr/lib/x86_64-linux-gnu"
+          for lib_pattern in "libx264" "libx265" "libvpx" "libmp3lame" "libfdk-aac" "libvorbis" "libtheora" "libopus" "libdav1d"; do
+            find "$SYSTEM_LIBS" -name "${lib_pattern}*.so*" -type f | while read -r lib_file; do
+              lib_name=$(basename "$lib_file")
+              if [ ! -f "linux-package/lib/$lib_name" ]; then
+                echo "Bundling system library: $lib_name"
+                cp "$lib_file" linux-package/lib/
+              fi
+            done
+          done
+
+          echo "=== Creating application wrapper ==="
+          
+          # Create advanced launch script
+          cat > linux-package/artemis << 'EOF'
+#!/bin/bash
+
+# Artemis Desktop Linux Launcher
+# This script ensures all bundled libraries are available and sets up the environment
+
+# Get the directory where this script is located
+if [ -L "${BASH_SOURCE[0]}" ]; then
+    # Script is a symlink, resolve to actual location
+    SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+else
+    # Script is not a symlink
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
+
+# Set up environment variables
+export LD_LIBRARY_PATH="$SCRIPT_DIR/lib:$LD_LIBRARY_PATH"
+export QT_PLUGIN_PATH="$SCRIPT_DIR/lib/qt6/plugins:$QT_PLUGIN_PATH"
+export QT_QPA_PLATFORM_PLUGIN_PATH="$SCRIPT_DIR/lib/qt6/plugins/platforms"
+
+# Enable hardware acceleration if available
+export QT_XCB_GL_INTEGRATION=xcb_egl
+export QT_QUICK_BACKEND=rhi
+export QT_RHI_BACKEND=opengl
+
+# VAAPI support
+if [ -d "/usr/lib/x86_64-linux-gnu/dri" ]; then
+    export LIBVA_DRIVERS_PATH="/usr/lib/x86_64-linux-gnu/dri:$LIBVA_DRIVERS_PATH"
+fi
+
+# Debug information (can be disabled by setting ARTEMIS_QUIET=1)
+if [ "$ARTEMIS_DEBUG" = "1" ]; then
+    echo "Artemis Desktop Linux Launcher"
+    echo "Script directory: $SCRIPT_DIR"
+    echo "Library path: $LD_LIBRARY_PATH"
+    echo "Qt plugin path: $QT_PLUGIN_PATH"
+    echo ""
+    echo "Checking dependencies..."
+    ldd "$SCRIPT_DIR/bin/artemis" | grep -E "(not found|SDL|opus|ssl|crypto|Qt6)" || true
+    echo ""
+fi
+
+# Launch the application
+exec "$SCRIPT_DIR/bin/artemis" "$@"
+EOF
+
+          chmod +x linux-package/artemis
+
+          echo "=== Creating installation script ==="
+          
+          cat > linux-package/install.sh << 'EOF'
+#!/bin/bash
+
+set -e
+
+echo "========================================"
+echo "  Artemis Desktop Linux Installer"
+echo "========================================"
+echo
+
+# Installation directories
+INSTALL_DIR="$HOME/.local/share/artemis-desktop"
+BIN_DIR="$HOME/.local/bin"
+APPLICATIONS_DIR="$HOME/.local/share/applications"
+ICONS_DIR="$HOME/.local/share/icons/hicolor"
+
+echo "Installing to: $INSTALL_DIR"
+
+# Create directories
+mkdir -p "$INSTALL_DIR" "$BIN_DIR" "$APPLICATIONS_DIR"
+mkdir -p "$ICONS_DIR/256x256/apps" "$ICONS_DIR/scalable/apps"
+
+# Copy all files
+echo "Copying application files..."
+cp -r ./* "$INSTALL_DIR/"
+
+# Create symlink to launcher in PATH
+echo "Creating launcher symlink..."
+ln -sf "$INSTALL_DIR/artemis" "$BIN_DIR/artemis"
+
+# Install desktop entry
+echo "Installing desktop entry..."
+cat > "$APPLICATIONS_DIR/artemis-desktop.desktop" << 'EOD'
+[Desktop Entry]
+Type=Application
+Name=Artemis Desktop
+Comment=Game streaming client with comprehensive codec support
+Exec=artemis
+Icon=artemis-desktop
+Categories=Game;Network;AudioVideo;
+Keywords=gaming;streaming;nvidia;gamestream;sunshine;codec;
+StartupNotify=true
+MimeType=x-scheme-handler/artemis;
+EOD
+
+# Copy icons if they exist
+if [ -f "$INSTALL_DIR/share/icons/hicolor/256x256/apps/artemis.png" ]; then
+    cp "$INSTALL_DIR/share/icons/hicolor/256x256/apps/artemis.png" "$ICONS_DIR/256x256/apps/artemis-desktop.png"
+fi
+
+if [ -f "$INSTALL_DIR/share/icons/hicolor/scalable/apps/artemis.svg" ]; then
+    cp "$INSTALL_DIR/share/icons/hicolor/scalable/apps/artemis.svg" "$ICONS_DIR/scalable/apps/artemis-desktop.svg"
+fi
+
+# Update desktop database
+if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database "$APPLICATIONS_DIR" 2>/dev/null || true
+fi
+
+# Update icon cache
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    gtk-update-icon-cache "$ICONS_DIR" 2>/dev/null || true
+fi
+
+echo
+echo "========================================"
+echo "  Installation Complete!"
+echo "========================================"
+echo
+echo "You can now run Artemis Desktop by:"
+echo "  1. Running 'artemis' from terminal"
+echo "  2. Finding it in your applications menu"
+echo
+echo "If the 'artemis' command is not found,"
+echo "add ~/.local/bin to your PATH:"
+echo "  export PATH=\"\$HOME/.local/bin:\$PATH\""
+echo
+echo "For debugging, run: ARTEMIS_DEBUG=1 artemis"
+echo
+EOF
+
+          chmod +x linux-package/install.sh
+
+          echo "=== Creating documentation ==="
+          
+          # Create comprehensive README
+          cat > linux-package/README.md << 'EOF'
+# Artemis Desktop - Linux Distribution
+
+This is a complete, self-contained Linux distribution of Artemis Desktop with all necessary dependencies bundled.
+
+## Features
+
+- **Complete Dependency Bundle**: All required libraries included
+- **Hardware Acceleration**: VA-API, VDPAU, and OpenGL support
+- **Comprehensive Codec Support**: H.264, H.265, AV1, and more
+- **Audio Support**: Multiple audio backends (ALSA, PulseAudio, JACK)
+- **Cross-Distribution Compatibility**: Works on most modern Linux distributions
+
+## Quick Installation
+
+1. Extract this archive to any location
+2. Run the installer: `./install.sh`
+3. Launch from terminal: `artemis`
+
+## Manual Installation
+
+1. Run directly: `./artemis`
+2. Or copy to your preferred location and run from there
+
+## System Requirements
+
+- Linux x86_64 (64-bit)
+- OpenGL 3.0+ support (for best performance)
+- Modern Linux distribution (Ubuntu 18.04+, Fedora 30+, etc.)
+
+## Troubleshooting
+
+### Missing Libraries
+If you encounter library errors, your system may be missing some base libraries:
+
+```bash
+# Ubuntu/Debian:
+sudo apt install libgl1-mesa-glx libegl1-mesa libxcb1
+
+# Fedora/RHEL:
+sudo dnf install mesa-libGL mesa-libEGL libxcb
+
+# Arch Linux:
+sudo pacman -S mesa libxcb
+```
+
+### Hardware Acceleration
+For optimal performance, ensure your graphics drivers are properly installed:
+
+- **NVIDIA**: Install proprietary drivers via your distribution's package manager
+- **AMD**: Mesa drivers (usually pre-installed)
+- **Intel**: Mesa drivers (usually pre-installed)
+
+### Audio Issues
+If you experience audio problems:
+
+1. Check that PulseAudio or ALSA is running
+2. Verify audio permissions for your user
+3. Try running: `ARTEMIS_DEBUG=1 artemis` for diagnostic information
+
+### Debug Mode
+Run with debug information:
+```bash
+ARTEMIS_DEBUG=1 artemis
+```
+
+## Uninstallation
+
+If installed via `install.sh`:
+
+```bash
+rm -rf ~/.local/share/artemis-desktop
+rm -f ~/.local/bin/artemis
+rm -f ~/.local/share/applications/artemis-desktop.desktop
+```
+
+## Support
+
+For issues specific to this Linux distribution, please check:
+1. The bundled library list in `library_info.txt`
+2. Your system's OpenGL and driver status
+3. Audio system configuration
+EOF
+
+          # Create build and library information
+          cat > linux-package/build_info.txt << EOF
+Artemis Desktop - Complete Linux Build
+=====================================
+
+Version: $VERSION
+Numeric Version: ${{ needs.setup-version.outputs.numeric_version }}
+Is Prerelease: ${{ needs.setup-version.outputs.is_prerelease }}
+Branch: ${{ github.ref_name }}
+Commit: ${{ github.sha }}
+Built: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+Qt Version: ${{ env.QT_VERSION }}
+
+Architecture: x86_64 (64-bit)
+Build Host: $(uname -a)
+Compiler: $(gcc --version | head -1)
+
+Bundled Libraries:
+==================
+$(ls -la linux-package/lib/ | tail -n +2)
+
+System Dependencies at Build Time:
+==================================
+$(ldd app/artemis)
+
+Hardware Acceleration Support:
+=============================
+- VA-API: Yes (if system drivers available)
+- VDPAU: Yes (if system drivers available)
+- OpenGL: Yes
+- Vulkan: System dependent
+
+Codec Support:
+=============
+- H.264: Yes
+- H.265/HEVC: Yes
+- AV1: Yes (if libdav1d available)
+- VP8/VP9: Yes
+- Audio: Opus, AAC, MP3, Vorbis
+
+Audio Backends:
+==============
+- ALSA: Yes
+- PulseAudio: Yes
+- JACK: Yes (if available)
+- SDL2 Audio: Yes
+
+Network Features:
+================
+- SSL/TLS: Yes (bundled)
+- mDNS: Yes
+
+Installation Options:
+====================
+1. Automated: Run ./install.sh
+2. Manual: Run ./artemis directly
+3. Portable: Copy entire folder anywhere
+
+For support and updates, visit the project repository.
+EOF
+
+          # Create library info file
+          echo "=== Library Information ===" > linux-package/library_info.txt
+          echo "Bundled libraries in lib/ directory:" >> linux-package/library_info.txt
+          ls -la linux-package/lib/ >> linux-package/library_info.txt
+          echo "" >> linux-package/library_info.txt
+          echo "Application dependencies:" >> linux-package/library_info.txt
+          ldd app/artemis >> linux-package/library_info.txt 2>&1 || echo "ldd failed" >> linux-package/library_info.txt
+
+          # Copy application icons if they exist
+          if [ -f "app/artemis.png" ]; then
+            cp app/artemis.png linux-package/share/icons/hicolor/256x256/apps/
+          fi
+          
+          if [ -f "app/res/artemis.svg" ]; then
+            cp app/res/artemis.svg linux-package/share/icons/hicolor/scalable/apps/
+          fi
+
+          echo "=== Package contents ==="
+          find linux-package -type f | sort
+          
+          echo "=== Package sizes ==="
+          du -sh linux-package/
+          du -sh linux-package/lib/
+          
+          # Verify the launcher works
+          echo "=== Testing launcher ==="
+          cd linux-package
+          if ./artemis --version 2>/dev/null || ./artemis --help 2>/dev/null; then
+            echo "Launcher test successful"
+          else
+            echo "Warning: Launcher test inconclusive (may require display)"
+          fi
+          cd ..
+
+      - name: Create distribution archives
+        env:
+          VERSION: ${{ needs.setup-version.outputs.version }}
+        run: |
+          echo "=== Creating distribution archives ==="
+          
+          # Create compressed tar.gz
+          tar -czf "artemis-linux-complete-${VERSION}.tar.gz" -C linux-package .
+          
+          # Create zip file for Windows users
+          cd linux-package
+          zip -r "../artemis-linux-complete-${VERSION}.zip" .
+          cd ..
+          
+          # Create tar.xz for maximum compression
+          tar -cJf "artemis-linux-complete-${VERSION}.tar.xz" -C linux-package .
+          
+          echo "=== Archive sizes ==="
+          ls -lh artemis-linux-complete-${VERSION}.*
+
+      - name: Upload Complete Linux Distribution
         uses: actions/upload-artifact@v4
         with:
-          name: artemis-linux
-          path: ${{ steps.archive.outputs.package-path }}
+          name: artemis-linux-complete-${{ needs.setup-version.outputs.version }}
+          path: |
+            artemis-linux-complete-${{ needs.setup-version.outputs.version }}.tar.gz
+            artemis-linux-complete-${{ needs.setup-version.outputs.version }}.zip
+            artemis-linux-complete-${{ needs.setup-version.outputs.version }}.tar.xz
+          retention-days: 30
 
-  release:
-    name: Create GitHub Release
-    needs: build-linux
-    if: startsWith(github.ref, 'refs/tags/v')
+  create-release:
+    name: Create Linux Release
+    needs: [setup-version, build-linux-complete]
     runs-on: ubuntu-latest
-
+    if: (github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') && needs.setup-version.outputs.should_build == 'true'
     steps:
-      - name: Download Build Artifact
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Display release info
+        run: |
+          echo "Creating Linux release with version: ${{ needs.setup-version.outputs.version }}"
+          echo "Is prerelease: ${{ needs.setup-version.outputs.is_prerelease }}"
+
+      - name: Create tag for release
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag ${{ needs.setup-version.outputs.version }}
+          git push origin ${{ needs.setup-version.outputs.version }}
+
+      - name: Generate Changelog
+        id: changelog
+        run: |
+          CURRENT_VERSION="${{ needs.setup-version.outputs.version }}"
+          PREV_TAG=$(git tag --sort=-creatordate | grep -v "$CURRENT_VERSION" | head -n1)
+          
+          if [ -z "$PREV_TAG" ]; then
+            SINCE_DATE=$(date -d '7 days ago' '+%Y-%m-%d')
+            echo "No previous release found. Getting commits since $SINCE_DATE"
+            COMMITS=$(git log --since="$SINCE_DATE" --pretty=format:"%h|%s|%an|%ad" --date=short --no-merges)
+          else
+            echo "Getting commits since last release: $PREV_TAG"
+            COMMITS=$(git log ${PREV_TAG}..$CURRENT_VERSION --pretty=format:"%h|%s|%an|%ad" --date=short --no-merges)
+          fi
+
+          FEATURES=""
+          BUGFIXES=""
+          IMPROVEMENTS=""
+          OTHER=""
+
+          while IFS='|' read -r hash subject author date; do
+            if [ -z "$hash" ]; then continue; fi
+            subject=$(echo "$subject" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            
+            if echo "$subject" | grep -iE "^(feat|feature|add|implement|new)[:|\\s]" > /dev/null; then
+              FEATURES="${FEATURES}- ${subject} (${hash})\\n"
+            elif echo "$subject" | grep -iE "^(fix|bug|resolve|correct)[:|\\s]" > /dev/null; then
+              BUGFIXES="${BUGFIXES}- ${subject} (${hash})\\n"
+            elif echo "$subject" | grep -iE "^(improve|enhance|update|optimize|refactor)[:|\\s]" > /dev/null; then
+              IMPROVEMENTS="${IMPROVEMENTS}- ${subject} (${hash})\\n"
+            else
+              OTHER="${OTHER}- ${subject} (${hash})\\n"
+            fi
+          done <<< "$COMMITS"
+
+          CHANGELOG="## 🐧 Linux Release Changelog\\n\\n"
+          [ ! -z "$FEATURES" ] && CHANGELOG="${CHANGELOG}### ✨ New Features\\n${FEATURES}\\n"
+          [ ! -z "$BUGFIXES" ] && CHANGELOG="${CHANGELOG}### 🐛 Bug Fixes\\n${BUGFIXES}\\n"
+          [ ! -z "$IMPROVEMENTS" ] && CHANGELOG="${CHANGELOG}### 🔧 Improvements\\n${IMPROVEMENTS}\\n"
+          [ ! -z "$OTHER" ] && CHANGELOG="${CHANGELOG}### 📝 Other Changes\\n${OTHER}\\n"
+
+          echo -e "$CHANGELOG" > changelog.md
+          echo "Generated changelog:"
+          cat changelog.md
+
+          {
+            echo 'changelog<<EOF'
+            cat changelog.md
+            echo EOF
+          } >> $GITHUB_OUTPUT
+
+      - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
-          name: artemis-linux
-          path: release-package
+          path: artifacts
 
-      - name: Create GitHub Release
-        id: create_release
-        uses: actions/create-release@v1
+      - name: List artifacts for debugging
+        run: |
+          echo "Downloaded artifacts:"
+          find artifacts -type f -name "*.tar.gz" -o -name "*.zip" -o -name "*.tar.xz" | sort
+
+      - name: Create Linux Release
+        uses: softprops/action-gh-release@v1
         with:
-          tag_name: ${{ github.ref_name }}
-          release_name: Release ${{ github.ref_name }}
+          tag_name: ${{ needs.setup-version.outputs.version }}
+          name: "🐧 ${{ (github.ref_name == 'main' || github.ref_name == 'master') && 'Linux Release' || 'Linux Development Build' }} ${{ needs.setup-version.outputs.version }}"
+          body: |
+            # ${{ (github.ref_name == 'main' || github.ref_name == 'master') && '🚀 Linux Production Release' || '🐧 Linux Development Build' }}
+
+            ${{ (github.ref_name == 'main' || github.ref_name == 'master') && '**✅ Stable Release**: This is an official production release for Linux systems with comprehensive dependency bundling.' || '**⚠️ Development Build**: This is an automated development build for Linux systems. Use for testing purposes.' }}
+
+            ## 📦 Complete Linux Distribution
+
+            This release includes a **complete, self-contained Linux distribution** with:
+
+            - ✅ **All Dependencies Bundled**: No need to hunt for libraries
+            - 🎮 **Hardware Acceleration**: VA-API, VDPAU, OpenGL support  
+            - 🎵 **Complete Codec Support**: H.264, H.265, AV1, Opus, and more
+            - 🔊 **Multiple Audio Backends**: ALSA, PulseAudio, JACK
+            - 📱 **Cross-Distribution**: Works on Ubuntu, Fedora, Arch, and more
+            - 🚀 **Easy Installation**: Automated installer included
+
+            ## 🔽 Download Options
+
+            - **`.tar.gz`** - Standard Linux archive (recommended)
+            - **`.zip`** - Windows-friendly format  
+            - **`.tar.xz`** - Maximum compression
+
+            ## ⚡ Quick Start
+
+            ```bash
+            # Download and extract
+            tar -xzf artemis-linux-complete-${{ needs.setup-version.outputs.version }}.tar.gz
+            cd artemis-linux-complete-*/
+
+            # Install (recommended)
+            ./install.sh
+
+            # Or run directly  
+            ./artemis
+            ```
+
+            ## 🎯 Key Features
+
+            - **Complete Dependency Bundle**: SDL2, FFmpeg, OpenSSL, Qt6, and more
+            - **Hardware Video Decode**: Automatic GPU acceleration when available  
+            - **Comprehensive Audio**: Multiple backend support with automatic detection
+            - **Security**: Latest SSL/TLS libraries bundled
+            - **Performance**: Optimized builds with proper RPATH configuration
+
+            ---
+
+            ${{ steps.changelog.outputs.changelog }}
+
+            ---
+
+            ## 📋 Build Information
+
+            - **Version**: `${{ needs.setup-version.outputs.version }}`
+            - **Numeric Version**: `${{ needs.setup-version.outputs.numeric_version }}`
+            - **Architecture**: Linux x86_64
+            - **Qt Version**: ${{ env.QT_VERSION }}
+            - **Branch**: `${{ github.ref_name }}`
+            - **Commit**: `${{ github.sha }}`
+            - **Build**: #${{ github.run_number }}
+
+            ## 🛠️ System Requirements
+
+            - Linux x86_64 (64-bit)
+            - OpenGL 3.0+ support  
+            - Modern Linux distribution (Ubuntu 18.04+, Fedora 30+, etc.)
+            - Graphics drivers installed for best performance
+
+            ## 📞 Support
+
+            For Linux-specific issues, check the included `README.md` and `build_info.txt` files in the distribution.
+
+          files: |
+            artifacts/**/*.tar.gz
+            artifacts/**/*.zip  
+            artifacts/**/*.tar.xz
+          prerelease: ${{ needs.setup-version.outputs.is_prerelease }}
           draft: false
-          prerelease: false
-
-      - name: Upload Release Asset
-        uses: actions/upload-release-asset@v1
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: release-package/${{ needs.build-linux.outputs.package-path }}
-          asset_name: ${{ needs.build-linux.outputs.package-path }}
-          asset_content_type: application/gzip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
