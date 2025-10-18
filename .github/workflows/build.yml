@@ -428,6 +428,7 @@ jobs:
           # Create a simple icon if one doesn't exist
           if [ -f "app/artemis.png" ]; then
             cp app/artemis.png AppDir/usr/share/icons/hicolor/256x256/apps/artemis.png
+            cp app/artemis.png AppDir/artemis.png
           else
             # Create minimal valid PNG as placeholder
             echo "Creating placeholder icon..."
