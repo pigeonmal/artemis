@@ -105,14 +105,33 @@ jobs:
           # Copy the main binary
           cp app/artemis linux-package/bin/
           
-          # Bundle critical shared libraries
-          echo "Bundling SDL2 libraries..."
-          ldd app/artemis | grep -E "(libSDL2-2\.0|libSDL2_ttf|libopus)" | while read -r line; do
-            lib_path=$(echo "$line" | grep -o '/[^[:space:]]*')
-            if [ -n "$lib_path" ] && [ -f "$lib_path" ]; then
-              lib_name=$(basename "$lib_path")
-              echo "Bundling library: $lib_name"
-              cp "$lib_path" linux-package/lib/
+          # Bundle ALL required shared libraries (more aggressive bundling)
+          echo "Bundling shared libraries..."
+          
+          # Function to recursively copy library dependencies
+          copy_deps() {
+            local binary="$1"
+            ldd "$binary" 2>/dev/null | grep "=>" | awk '{print $3}' | while read -r lib; do
+              if [ -n "$lib" ] && [ -f "$lib" ]; then
+                lib_name=$(basename "$lib")
+                # Skip system libraries that should always be present
+                if [[ ! "$lib" =~ ^/lib/x86_64-linux-gnu/(libc|libm|libpthread|libdl|librt|ld-linux) ]]; then
+                  if [ ! -f "linux-package/lib/$lib_name" ]; then
+                    echo "Bundling: $lib_name"
+                    cp -L "$lib" linux-package/lib/
+                  fi
+                fi
+              fi
+            done
+          }
+          
+          # Copy dependencies for main binary
+          copy_deps "app/artemis"
+          
+          # Also copy any dependencies of the bundled libraries
+          for lib in linux-package/lib/*.so*; do
+            if [ -f "$lib" ]; then
+              copy_deps "$lib"
             fi
           done
           
@@ -131,16 +150,47 @@ jobs:
           #!/bin/bash
           echo "Installing Artemis Desktop..."
           
+          # Check for required system packages on Fedora
+          if command -v dnf &> /dev/null; then
+            echo "Detected Fedora/RHEL system"
+            echo "Checking for required packages..."
+            
+            MISSING_PACKAGES=()
+            
+            # Check for each required package
+            for pkg in SDL2 SDL2_ttf qt6-qtbase qt6-qtmultimedia; do
+              if ! rpm -q "$pkg" &> /dev/null; then
+                MISSING_PACKAGES+=("$pkg")
+              fi
+            done
+            
+            if [ ${#MISSING_PACKAGES[@]} -ne 0 ]; then
+              echo "Missing packages detected: ${MISSING_PACKAGES[*]}"
+              echo "Installing dependencies..."
+              sudo dnf install -y "${MISSING_PACKAGES[@]}"
+            else
+              echo "All required packages are installed."
+            fi
+          fi
+          
           # Install to local directory
           INSTALL_DIR="$HOME/.local/share/artemis-desktop"
           BIN_DIR="$HOME/.local/bin"
           mkdir -p "$INSTALL_DIR" "$BIN_DIR"
           
           # Copy all files
-          cp -r * "$INSTALL_DIR/"
+          echo "Copying files to $INSTALL_DIR..."
+          cp -r ./* "$INSTALL_DIR/"
           
           # Create symlink
           ln -sf "$INSTALL_DIR/artemis" "$BIN_DIR/artemis"
+          
+          # Ensure bin directory is in PATH
+          if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
+            echo ""
+            echo "NOTE: Add the following to your ~/.bashrc or ~/.zshrc:"
+            echo "export PATH=\"\$HOME/.local/bin:\$PATH\""
+          fi
           
           # Create desktop entry
           mkdir -p "$HOME/.local/share/applications"
@@ -149,44 +199,104 @@ jobs:
           Type=Application
           Name=Artemis Desktop
           Comment=Game streaming client
-          Exec=artemis
+          Exec=$HOME/.local/bin/artemis
           Icon=artemis-desktop
           Categories=Game;Network;
+          Terminal=false
           EOD
           
+          echo ""
           echo "Installation complete!"
           echo "Run 'artemis' from terminal or find it in your applications menu."
           EOF
           chmod +x linux-package/install.sh
           
-          # Create README
+          # Create uninstall script
+          cat > linux-package/uninstall.sh << 'EOF'
+          #!/bin/bash
+          echo "Uninstalling Artemis Desktop..."
+          
+          rm -rf "$HOME/.local/share/artemis-desktop"
+          rm -f "$HOME/.local/bin/artemis"
+          rm -f "$HOME/.local/share/applications/artemis-desktop.desktop"
+          
+          echo "Uninstall complete!"
+          EOF
+          chmod +x linux-package/uninstall.sh
+          
+          # Create README with troubleshooting
           cat > linux-package/README.md << 'EOF'
           # Artemis Desktop - Linux Build
           
           ## Installation on Fedora
           
-          1. Extract this archive
-          2. Install dependencies:
+          ### Quick Install
           ```bash
-          sudo dnf install SDL2 SDL2_ttf opus ffmpeg-libs openssl-libs
+          ./install.sh
           ```
-          3. Run the installer: `./install.sh`
-          4. Launch: `artemis`
           
-          ## Manual Installation
+          The installer will automatically detect and install missing dependencies on Fedora.
           
-          Run directly: `./artemis`
+          ### Manual Installation
+          
+          1. Install dependencies:
+          ```bash
+          sudo dnf install SDL2 SDL2_ttf qt6-qtbase qt6-qtmultimedia
+          ```
+          
+          2. Run directly:
+          ```bash
+          ./artemis
+          ```
           
           ## Troubleshooting
           
-          If you encounter missing library errors, install:
+          ### Missing FFmpeg libraries
+          If you get errors about `libavcodec.so.XX` or other FFmpeg libraries:
+          
           ```bash
-          sudo dnf install SDL2 SDL2_ttf opus ffmpeg openssl
+          # Fedora 39+
+          sudo dnf install ffmpeg-libs
+          
+          # If that doesn't work, enable RPM Fusion:
+          sudo dnf install https://download1.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm
+          sudo dnf install ffmpeg-libs
           ```
+          
+          ### Missing libraries in general
+          Check what's missing:
+          ```bash
+          ldd ./bin/artemis
+          ```
+          
+          Install missing packages:
+          ```bash
+          sudo dnf install <package-name>
+          ```
+          
+          ### Library path issues
+          The launcher script should handle library paths automatically. If you still have issues:
+          ```bash
+          export LD_LIBRARY_PATH="$(pwd)/lib:$LD_LIBRARY_PATH"
+          ./bin/artemis
+          ```
+          
+          ## Uninstallation
+          
+          ```bash
+          ./uninstall.sh
+          ```
+          
+          ## Bundled Libraries
+          
+          This package includes most required libraries. See `library_dependencies.txt` for the full list.
           EOF
           
           # Save library dependencies for reference
-          ldd app/artemis > linux-package/library_dependencies.txt
+          echo "=== Binary Dependencies ===" > linux-package/library_dependencies.txt
+          ldd app/artemis >> linux-package/library_dependencies.txt
+          echo -e "\n=== Bundled Libraries ===" >> linux-package/library_dependencies.txt
+          ls -lh linux-package/lib/ >> linux-package/library_dependencies.txt
 
       - name: Package tarball
         env:
@@ -194,6 +304,7 @@ jobs:
         run: |
           tar -czf artemis-linux-$VERSION.tar.gz -C linux-package .
           echo "Created: artemis-linux-$VERSION.tar.gz"
+          ls -lh artemis-linux-$VERSION.tar.gz
 
       - name: Upload tarball
         uses: actions/upload-artifact@v4
@@ -268,8 +379,17 @@ jobs:
           mkdir -p AppDir/usr/share/icons/hicolor/256x256/apps
           mkdir -p AppDir/usr/lib
           
-          # Copy binary
-          cp app/artemis AppDir/usr/bin/
+          # Copy binary to CORRECT location (not nested usr/bin/usr/bin)
+          echo "Copying binary..."
+          cp -v app/artemis AppDir/usr/bin/artemis
+          chmod +x AppDir/usr/bin/artemis
+          
+          # Verify binary location
+          if [ ! -f "AppDir/usr/bin/artemis" ]; then
+            echo "ERROR: Binary not copied correctly!"
+            exit 1
+          fi
+          echo "Binary located at: AppDir/usr/bin/artemis"
           
           # Manually copy xcb libraries that linuxdeployqt might miss
           echo "Pre-copying xcb libraries..."
@@ -283,7 +403,6 @@ jobs:
           for lib in /usr/lib/x86_64-linux-gnu/libxcb-*.so*; do
             if [ -f "$lib" ]; then
               cp -L "$lib" AppDir/usr/lib/
-              echo "Copied: $(basename $lib)"
             fi
           done
           
@@ -291,7 +410,6 @@ jobs:
           for lib in /usr/lib/x86_64-linux-gnu/libxkbcommon*.so*; do
             if [ -f "$lib" ]; then
               cp -L "$lib" AppDir/usr/lib/
-              echo "Copied: $(basename $lib)"
             fi
           done
           
@@ -307,25 +425,31 @@ jobs:
           Keywords=gaming;streaming;nvidia;gamestream;sunshine;
           EOF
           
-          # Create a placeholder icon if one doesn't exist
-          if [ ! -f "app/artemis.png" ]; then
-            # Create a simple placeholder SVG and convert to PNG
-            cat > AppDir/usr/share/icons/hicolor/256x256/apps/artemis.png << 'EOF'
-          # This would be your app icon - placeholder for now
-          EOF
-          else
+          # Create a simple icon if one doesn't exist
+          if [ -f "app/artemis.png" ]; then
             cp app/artemis.png AppDir/usr/share/icons/hicolor/256x256/apps/artemis.png
+          else
+            # Create minimal valid PNG as placeholder
+            echo "Creating placeholder icon..."
+            convert -size 256x256 xc:blue -font DejaVu-Sans -pointsize 72 \
+              -fill white -gravity center -annotate +0+0 'A' \
+              AppDir/usr/share/icons/hicolor/256x256/apps/artemis.png 2>/dev/null || \
+            touch AppDir/usr/share/icons/hicolor/256x256/apps/artemis.png
           fi
+          
+          # Create AppDir root desktop file (required by some AppImage tools)
+          cp AppDir/usr/share/applications/artemis.desktop AppDir/artemis.desktop
           
           # Set environment for linuxdeployqt
           export LD_LIBRARY_PATH="$(pwd)/AppDir/usr/lib:$LD_LIBRARY_PATH"
           
           # Run linuxdeployqt with bundled libraries
+          echo "Running linuxdeployqt..."
           cd AppDir
-          linuxdeployqt usr/share/applications/artemis.desktop \
+          linuxdeployqt usr/bin/artemis \
             -bundle-non-qt-libs \
             -extra-plugins=iconengines,platformthemes/libqgtk3.so \
-            -verbose=2 || true
+            -verbose=2 || echo "linuxdeployqt completed with warnings"
           
           # Verify xcb-cursor was copied
           if [ ! -f "usr/lib/libxcb-cursor.so.0" ]; then
@@ -333,31 +457,62 @@ jobs:
             cp -L /usr/lib/x86_64-linux-gnu/libxcb-cursor.so.0 usr/lib/ || true
           fi
           
-          # Create custom AppRun with library path
-          cat > AppRun << 'EOF'
+          # Verify binary still exists in correct location
+          if [ ! -f "usr/bin/artemis" ]; then
+            echo "ERROR: Binary disappeared after linuxdeployqt!"
+            ls -la usr/bin/
+            exit 1
+          fi
+          
+          # Create custom AppRun with correct path
+          cat > AppRun << 'EOFRUN'
           #!/bin/bash
           HERE="$(dirname "$(readlink -f "${0}")")"
+          
+          # Debug output
+          # echo "HERE: $HERE"
+          # echo "Binary path: ${HERE}/usr/bin/artemis"
+          
+          # Set library paths
           export LD_LIBRARY_PATH="${HERE}/usr/lib:${HERE}/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}"
           export QT_PLUGIN_PATH="${HERE}/usr/plugins:${QT_PLUGIN_PATH}"
           export QT_QPA_PLATFORM_PLUGIN_PATH="${HERE}/usr/plugins/platforms"
           export XDG_DATA_DIRS="${HERE}/usr/share:${XDG_DATA_DIRS}"
+          
+          # Execute the binary
           exec "${HERE}/usr/bin/artemis" "$@"
-          EOF
+          EOFRUN
           chmod +x AppRun
+          
+          # Verify AppRun exists and is executable
+          if [ ! -x "AppRun" ]; then
+            echo "ERROR: AppRun not created properly!"
+            exit 1
+          fi
           
           cd ..
           
-          # List AppDir contents for debugging
+          # Debug: Show AppDir structure
           echo "=== AppDir structure ==="
-          find AppDir -type f -name "*.so*" | head -20
+          ls -la AppDir/
+          echo "=== usr/bin contents ==="
+          ls -la AppDir/usr/bin/
+          echo "=== Libraries (first 20) ==="
+          find AppDir/usr/lib -name "*.so*" -type f | head -20
           
           # Create AppImage
+          echo "Creating AppImage..."
           ARCH=x86_64 appimagetool AppDir "Artemis-${VERSION}-x86_64.AppImage"
           
           chmod +x "Artemis-${VERSION}-x86_64.AppImage"
-          echo "Created: Artemis-${VERSION}-x86_64.AppImage"
           
-          # Test the AppImage
+          # Verify AppImage was created
+          if [ ! -f "Artemis-${VERSION}-x86_64.AppImage" ]; then
+            echo "ERROR: AppImage not created!"
+            exit 1
+          fi
+          
+          echo "Successfully created: Artemis-${VERSION}-x86_64.AppImage"
           ls -lh "Artemis-${VERSION}-x86_64.AppImage"
 
       - name: Upload AppImage
@@ -389,7 +544,7 @@ jobs:
           tag_name: ${{ needs.setup-version.outputs.version }}
           name: "Linux Build ${{ needs.setup-version.outputs.version }}"
           body: |
-            ## Linux Builds
+            ## Linux Builds for Fedora
             
             **Version**: ${{ needs.setup-version.outputs.version }}
             **Branch**: ${{ github.ref_name }}
@@ -397,41 +552,59 @@ jobs:
             
             ### Available Downloads:
             
-            - **AppImage** (Recommended for Fedora): Run on any Linux distribution
-            - **Tarball**: Manual installation with bundled libraries
+            - **AppImage** (Recommended): Self-contained, runs on any Linux distribution
+            - **Tarball**: Includes bundled libraries and auto-installer for Fedora
             
             ### Installation on Fedora:
             
-            **Option 1: AppImage (Easiest)**
+            **Option 1: AppImage (Easiest - No Installation)**
             ```bash
-            # Make it executable
+            # Download and make executable
             chmod +x Artemis-*.AppImage
             
             # Run directly
             ./Artemis-*.AppImage
             
-            # Or integrate into system (optional)
+            # Optional: Move to PATH for easy access
             mkdir -p ~/.local/bin
             mv Artemis-*.AppImage ~/.local/bin/artemis
+            artemis
             ```
             
-            **Option 2: Tarball**
+            **Option 2: Tarball (Traditional Installation)**
             ```bash
             # Extract
             tar -xzf artemis-linux-*.tar.gz
             cd artemis-linux-*
             
-            # Install dependencies
-            sudo dnf install SDL2 SDL2_ttf opus ffmpeg-libs openssl-libs
-            
-            # Install
+            # Run the installer (automatically installs Fedora dependencies)
             ./install.sh
+            
+            # Launch
+            artemis
+            ```
+            
+            ### Troubleshooting:
+            
+            **Missing FFmpeg libraries (`libavcodec.so.XX` errors):**
+            ```bash
+            # Enable RPM Fusion (if not already enabled)
+            sudo dnf install https://download1.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm
+            
+            # Install FFmpeg
+            sudo dnf install ffmpeg-libs
+            ```
+            
+            **Other missing libraries:**
+            ```bash
+            sudo dnf install SDL2 SDL2_ttf qt6-qtbase qt6-qtmultimedia
             ```
             
             ### System Requirements:
-            - Fedora 38+ or any modern Linux distribution
-            - X11 or Wayland display server
+            - Fedora 38+ (or any modern Linux distribution)
+            - X11 or Wayland
             - OpenGL support
+            - FFmpeg libraries (from RPM Fusion)
           files: |
             artifacts/**/*.AppImage
             artifacts/**/*.tar.gz
