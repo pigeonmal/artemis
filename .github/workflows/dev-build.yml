@@ -44,7 +44,13 @@ jobs:
           libpulse-dev libudev-dev libx11-dev libxcursor-dev \
           libxext-dev libxi-dev libxinerama-dev libxrandr-dev \
           libxss-dev libxt-dev libxv-dev libxxf86vm-dev \
-          libxcb-dri3-dev libx11-xcb-dev
+          libxcb-dri3-dev libx11-xcb-dev fuse libfuse2
+
+    - name: Install linuxdeployqt
+      run: |
+        wget -nv https://github.com/probonopd/linuxdeployqt/releases/download/continuous/linuxdeployqt-7-x86_64.AppImage -O linuxdeployqt.AppImage
+        chmod +x linuxdeployqt.AppImage
+        sudo mv linuxdeployqt.AppImage /usr/local/bin/linuxdeployqt
     
     - name: Build
       run: |
