@@ -190,7 +190,7 @@ jobs:
         run: |
           sudo apt-get update
           
-          # Core build tools
+          # Core build tools and system packages (ldd is part of libc-bin, not a separate package)
           sudo apt-get install -y \
             build-essential \
             cmake \
@@ -203,7 +203,7 @@ jobs:
             tar \
             gzip \
             file \
-            ldd
+            libc-bin
 
           # Qt and graphics dependencies
           sudo apt-get install -y \
@@ -216,7 +216,7 @@ jobs:
             mesa-utils \
             mesa-common-dev
 
-          # Media and codec libraries
+          # Media and codec libraries (check availability and install if exists)
           sudo apt-get install -y \
             libopus-dev \
             libavcodec-dev \
@@ -226,24 +226,26 @@ jobs:
             libswresample-dev \
             libavfilter-dev \
             libavdevice-dev \
-            ffmpeg \
-            libplacebo-dev
+            ffmpeg || echo "Some FFmpeg packages not available, continuing..."
+
+          # Try to install libplacebo-dev (may not be available on older Ubuntu versions)
+          sudo apt-get install -y libplacebo-dev || echo "libplacebo-dev not available, skipping..."
 
           # Hardware acceleration
           sudo apt-get install -y \
             libva-dev \
             libvdpau-dev \
-            libxvmc-dev \
             vainfo \
-            vdpauinfo
+            vdpauinfo || echo "Some hardware acceleration packages not available, continuing..."
 
           # Audio libraries
           sudo apt-get install -y \
             libasound2-dev \
             libpulse-dev \
-            libjack-dev \
-            libsndio-dev \
             portaudio19-dev
+          
+          # Optional audio packages
+          sudo apt-get install -y libjack-dev libsndio-dev || echo "Optional audio packages not available, continuing..."
 
           # Input and windowing
           sudo apt-get install -y \
@@ -272,33 +274,40 @@ jobs:
             libwayland-client0 \
             libwayland-server0 \
             libwayland-cursor0 \
-            libwayland-egl1-mesa
+            libwayland-egl1-mesa || echo "Some Wayland packages not available, continuing..."
 
           # Security and networking
           sudo apt-get install -y \
             libssl-dev \
-            libcrypto++-dev \
             libcurl4-openssl-dev \
             libdbus-1-dev
+
+          # Try optional crypto package
+          sudo apt-get install -y libcrypto++-dev || echo "libcrypto++-dev not available, continuing..."
 
           # System libraries
           sudo apt-get install -y \
             libudev-dev \
-            libibus-1.0-dev \
             libfreetype6-dev \
             libfontconfig1-dev \
             libjpeg-dev \
             libpng-dev \
-            libtiff-dev \
-            libwebp-dev
+            libtiff-dev
+
+          # Optional system packages
+          sudo apt-get install -y \
+            libibus-1.0-dev \
+            libwebp-dev || echo "Some optional system packages not available, continuing..."
 
           # Compression and archive support
           sudo apt-get install -y \
             zlib1g-dev \
             libbz2-dev \
             liblzma-dev \
-            libzstd-dev \
             libarchive-dev
+
+          # Try newer compression libraries
+          sudo apt-get install -y libzstd-dev || echo "libzstd-dev not available, continuing..."
 
           # Development tools
           sudo apt-get install -y \
@@ -307,15 +316,19 @@ jobs:
             chrpath \
             patchelf
 
-          # Additional codec support
+          # Additional codec support (may not all be available on Ubuntu 22.04)
           sudo apt-get install -y \
             libx264-dev \
             libx265-dev \
             libvpx-dev \
             libmp3lame-dev \
-            libfdk-aac-dev \
             libvorbis-dev \
-            libtheora-dev
+            libtheora-dev || echo "Some codec packages not available, continuing..."
+
+          # Try optional codec packages
+          sudo apt-get install -y libfdk-aac-dev || echo "libfdk-aac-dev not available (non-free), continuing..."
+
+          echo "Package installation completed"
 
       - name: Clean any existing build
         run: |
@@ -418,13 +431,13 @@ jobs:
           echo "Bundling additional system libraries..."
           SYSTEM_LIBS="/usr/lib/x86_64-linux-gnu"
           for lib_pattern in "libx264" "libx265" "libvpx" "libmp3lame" "libfdk-aac" "libvorbis" "libtheora" "libopus" "libdav1d"; do
-            find "$SYSTEM_LIBS" -name "${lib_pattern}*.so*" -type f | while read -r lib_file; do
+            find "$SYSTEM_LIBS" -name "${lib_pattern}*.so*" -type f 2>/dev/null | while read -r lib_file; do
               lib_name=$(basename "$lib_file")
               if [ ! -f "linux-package/lib/$lib_name" ]; then
                 echo "Bundling system library: $lib_name"
                 cp "$lib_file" linux-package/lib/
               fi
-            done
+            done || true
           done
 
           echo "=== Creating application wrapper ==="
