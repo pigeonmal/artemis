@@ -1,4 +1,4 @@
-name: Linux Development Build & Release
+name: Linux Build & Release
 
 on:
   push:
@@ -10,13 +10,12 @@ on:
 
 env:
   QT_VERSION: '6.8.3'
+  CONTAINER_IMAGE: fedora:latest
 
 jobs:
   build-linux:
     name: Build on Fedora Linux
     runs-on: ubuntu-latest
-    container:
-      image: fedora:latest
 
     outputs:
       package-path: ${{ steps.archive.outputs.package-path }}
@@ -28,43 +27,75 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
-      - name: Install Fedora build tools & dependencies
+      - name: Set up Docker Build Environment
         run: |
-          dnf -y update
-          dnf -y groupinstall "Development Tools"
-          dnf -y install \
-            qt6-qtbase-devel qt6-qttools-devel qt6-qtmultimedia-devel \
-            openssl-devel SDL2-devel SDL2_ttf-devel opus-devel ffmpeg-devel \
-            libX11-devel libXcursor-devel libXext-devel libXi-devel \
-            libXrandr-devel freetype-devel mesa-libGL-devel \
-            wayland-devel libpulse-devel libudev-devel libplacebo-devel
+          echo "Using container image: $CONTAINER_IMAGE"
+          docker pull $CONTAINER_IMAGE
 
-      - name: Setup Qt 6
-        uses: jurplel/install-qt-action@v3
-        with:
-          version: ${{ env.QT_VERSION }}
-          host: linux
-          target: desktop
-          modules: qtmultimedia
-
-      - name: Clean and Build
+      - name: Build inside Fedora container
         run: |
-          rm -rf build .qmake.cache .qmake.stash
-          qmake6 artemis.pro CONFIG+=release QMAKE_CXXFLAGS+="-fPIC"
-          make -j$(nproc)
+          docker run --rm \
+            -v "${{ github.workspace }}":/workspace:z \
+            -w /workspace \
+            $CONTAINER_IMAGE \
+          bash -euxc "
+            dnf -y update
+            dnf -y groupinstall 'Development Tools'
+            dnf -y install \
+              git \
+              qt6-qtbase-devel qt6-qttools-devel qt6-qtmultimedia-devel \
+              openssl-devel SDL2-devel SDL2_ttf-devel opus-devel ffmpeg-devel \
+              libX11-devel libXrandr-devel freetype-devel mesa-libGL-devel \
+              wayland-devel libpulse-devel libudev-devel libplacebo-devel
 
-      - name: Bundle & Package
+            curl -sSL https://github.com/jurplel/install-qt-action/releases/download/v3.0.0/install-qt.sh | bash -s -- \
+              --version $QT_VERSION \
+              --host linux \
+              --target desktop \
+              --modules qtmultimedia
+
+            rm -rf build .qmake.cache .qmake.stash
+            export PATH=\"\$HOME/Qt/$QT_VERSION/bin:\$PATH\"
+            qmake6 artemis.pro CONFIG+=release QMAKE_CXXFLAGS+=\"-fPIC\"
+            make -j\$(nproc)
+
+            mkdir -p package/{bin,lib}
+            cp app/artemis package/bin/
+            ldd app/artemis \
+              | grep -E 'libQt6|libSDL2|libopus|libssl|libav' \
+              | awk '{print \$3}' \
+              | xargs -I{} cp {} package/lib/
+
+            # Create installer script
+            cat > package/install.sh << 'EOF'
+            #!/usr/bin/env bash
+            DEST=\"\$HOME/.local/share/artemis\"
+            BIN=\"\$HOME/.local/bin\"
+            mkdir -p \"\$DEST\" \"\$BIN\"
+            cp -r * \"\$DEST/\"
+            ln -sf \"\$DEST/artemis\" \"\$BIN/artemis\"
+            cat > \"\$HOME/.local/share/applications/artemis.desktop\" << EOD
+            [Desktop Entry]
+            Type=Application
+            Name=Artemis Desktop
+            Exec=artemis
+            Icon=artemis
+            Categories=Game;Network;
+            EOD
+            echo \"Installed Artemis to \$DEST; launcher: artemis\"
+            EOF
+            chmod +x package/install.sh
+
+            TAR=artemis-linux-\${GITHUB_REF_NAME:-build\${GITHUB_RUN_NUMBER}}.tar.gz
+            tar czf \$TAR -C package .
+            echo \"\$TAR\"
+          " > cont-build-output.txt
+
+      - name: Read package path
         id: archive
         run: |
-          mkdir -p package/{bin,lib}
-          cp app/artemis package/bin/
-          ldd app/artemis \
-            | grep -E "libQt6|libSDL2|libopus|libssl|libav" \
-            | awk '{print $3}' \
-            | xargs -I{} cp {} package/lib/
-          # Create installer script here as before...
-          tar czf artemis-linux-${{ github.ref_name || github.run_number }}.tar.gz -C package .
-          echo "::set-output name=package-path::artemis-linux-${{ github.ref_name || github.run_number }}.tar.gz"
+          PACKAGE=$(tail -n1 cont-build-output.txt)
+          echo "::set-output name=package-path::\$PACKAGE"
 
       - name: Upload Build Artifact
         uses: actions/upload-artifact@v4
@@ -77,6 +108,7 @@ jobs:
     needs: build-linux
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+
     steps:
       - name: Download Build Artifact
         uses: actions/download-artifact@v4
@@ -98,5 +130,5 @@ jobs:
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
           asset_path: release-package/${{ needs.build-linux.outputs.package-path }}
-          asset_name: artemis-linux-${{ github.ref_name }}.tar.gz
+          asset_name: ${{ needs.build-linux.outputs.package-path }}
           asset_content_type: application/gzip
