@@ -120,11 +120,11 @@ jobs:
 
           # Create launcher script
           cat > linux-package/artemis << 'EOF'
-#!/bin/bash
-SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
-export LD_LIBRARY_PATH="$SCRIPT_DIR/lib:$LD_LIBRARY_PATH"
-exec "$SCRIPT_DIR/bin/artemis" "$@"
-EOF
+          #!/bin/bash
+          SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+          export LD_LIBRARY_PATH="$SCRIPT_DIR/lib:$LD_LIBRARY_PATH"
+          exec "$SCRIPT_DIR/bin/artemis" "$@"
+          EOF
           chmod +x linux-package/artemis
 
       - name: Package Linux Build
