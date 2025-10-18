@@ -1,6 +1,4 @@
-name: Linux Build (AppImage)
-
-# Workflow to build Linux artifacts with AppImage for Fedora/general Linux use
+name: Linux Build
 
 on:
   push:
@@ -89,7 +87,8 @@ jobs:
             libpulse-dev libudev-dev libx11-dev libxcursor-dev \
             libxext-dev libxi-dev libxinerama-dev libxrandr-dev \
             libxss-dev libxt-dev libxv-dev libxxf86vm-dev \
-            libxcb-dri3-dev libx11-xcb-dev libplacebo-dev
+            libxcb-dri3-dev libx11-xcb-dev libplacebo-dev \
+            libcodec2-0.9 libcodec2-dev
 
       - name: Build
         run: |
@@ -313,219 +312,10 @@ jobs:
           path: artemis-linux-${{ needs.setup-version.outputs.version }}.tar.gz
           retention-days: 30
 
-  build-appimage:
-    name: Linux Build (AppImage)
-    needs: setup-version
-    runs-on: ubuntu-22.04
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          submodules: 'recursive'
-          fetch-depth: 0
-
-      - name: Setup Qt
-        uses: jurplel/install-qt-action@v3
-        with:
-          version: ${{ env.QT_VERSION }}
-          host: 'linux'
-          target: 'desktop'
-          modules: 'qtmultimedia'
-
-      - name: Install dependencies and AppImage tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential libfuse2 fuse squashfs-tools \
-            libegl1-mesa-dev libgl1-mesa-dev libopus-dev libsdl2-dev \
-            libsdl2-ttf-dev libssl-dev libavcodec-dev libavformat-dev \
-            libswscale-dev libva-dev libvdpau-dev libxkbcommon-dev \
-            wayland-protocols libdrm-dev nasm libgbm-dev \
-            libfreetype6-dev libasound2-dev libdbus-1-dev \
-            libgles2-mesa-dev libglu1-mesa-dev libibus-1.0-dev \
-            libpulse-dev libudev-dev libx11-dev libxcursor-dev \
-            libxext-dev libxi-dev libxinerama-dev libxrandr-dev \
-            libxss-dev libxt-dev libxv-dev libxxf86vm-dev \
-            libxcb-dri3-dev libx11-xcb-dev libplacebo-dev \
-            libxcb-cursor0 libxcb-cursor-dev libxcb-icccm4 \
-            libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
-            libxcb-render-util0 libxcb-shape0 libxcb-sync1 \
-            libxcb-util1 libxcb-xfixes0 libxcb-xinerama0 \
-            libxcb-xkb1 libxkbcommon-x11-0
-          
-          # Download linuxdeployqt
-          wget -O linuxdeployqt.AppImage https://github.com/probonopd/linuxdeployqt/releases/download/continuous/linuxdeployqt-continuous-x86_64.AppImage
-          chmod +x linuxdeployqt.AppImage
-          sudo mv linuxdeployqt.AppImage /usr/local/bin/linuxdeployqt
-          
-          # Download appimagetool
-          wget -O appimagetool.AppImage https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
-          chmod +x appimagetool.AppImage
-          sudo mv appimagetool.AppImage /usr/local/bin/appimagetool
-
-      - name: Build
-        run: |
-          export PATH="$Qt6_DIR/bin:$PATH"
-          qmake6 artemis.pro CONFIG+=release "QMAKE_CXXFLAGS+=-fPIC"
-          make -j$(nproc)
-
-      - name: Create AppImage
-        env:
-          VERSION: ${{ needs.setup-version.outputs.version }}
-        run: |
-          # Create AppDir structure
-          mkdir -p AppDir/usr/bin
-          mkdir -p AppDir/usr/share/applications
-          mkdir -p AppDir/usr/share/icons/hicolor/256x256/apps
-          mkdir -p AppDir/usr/lib
-          
-          # Copy binary to CORRECT location (not nested usr/bin/usr/bin)
-          echo "Copying binary..."
-          cp -v app/artemis AppDir/usr/bin/artemis
-          chmod +x AppDir/usr/bin/artemis
-          
-          # Verify binary location
-          if [ ! -f "AppDir/usr/bin/artemis" ]; then
-            echo "ERROR: Binary not copied correctly!"
-            exit 1
-          fi
-          echo "Binary located at: AppDir/usr/bin/artemis"
-          
-          # Manually copy xcb libraries that linuxdeployqt might miss
-          echo "Pre-copying xcb libraries..."
-          for lib in /usr/lib/x86_64-linux-gnu/libxcb-cursor*.so*; do
-            if [ -f "$lib" ]; then
-              cp -L "$lib" AppDir/usr/lib/
-              echo "Copied: $(basename $lib)"
-            fi
-          done
-          
-          for lib in /usr/lib/x86_64-linux-gnu/libxcb-*.so*; do
-            if [ -f "$lib" ]; then
-              cp -L "$lib" AppDir/usr/lib/
-            fi
-          done
-          
-          # Copy xkbcommon libraries
-          for lib in /usr/lib/x86_64-linux-gnu/libxkbcommon*.so*; do
-            if [ -f "$lib" ]; then
-              cp -L "$lib" AppDir/usr/lib/
-            fi
-          done
-          
-          # Create desktop file
-          cat > AppDir/usr/share/applications/artemis.desktop << 'EOF'
-          [Desktop Entry]
-          Type=Application
-          Name=Artemis Desktop
-          Comment=Game streaming client for GameStream and Sunshine
-          Exec=artemis
-          Icon=artemis
-          Categories=Game;Network;
-          Keywords=gaming;streaming;nvidia;gamestream;sunshine;
-          EOF
-          
-          # Create a simple icon if one doesn't exist
-          if [ -f "app/artemis.png" ]; then
-            cp app/artemis.png AppDir/usr/share/icons/hicolor/256x256/apps/artemis.png
-            cp app/artemis.png AppDir/artemis.png
-          else
-            # Create minimal valid PNG as placeholder
-            echo "Creating placeholder icon..."
-            convert -size 256x256 xc:blue -font DejaVu-Sans -pointsize 72 \
-              -fill white -gravity center -annotate +0+0 'A' \
-              AppDir/usr/share/icons/hicolor/256x256/apps/artemis.png 2>/dev/null || \
-            touch AppDir/usr/share/icons/hicolor/256x256/apps/artemis.png
-          fi
-          
-          # Create AppDir root desktop file (required by some AppImage tools)
-          cp AppDir/usr/share/applications/artemis.desktop AppDir/artemis.desktop
-          
-          # Set environment for linuxdeployqt
-          export LD_LIBRARY_PATH="$(pwd)/AppDir/usr/lib:$LD_LIBRARY_PATH"
-          
-          # Run linuxdeployqt with bundled libraries
-          echo "Running linuxdeployqt..."
-          cd AppDir
-          linuxdeployqt usr/bin/artemis \
-            -bundle-non-qt-libs \
-            -extra-plugins=iconengines,platformthemes/libqgtk3.so \
-            -verbose=2 || echo "linuxdeployqt completed with warnings"
-          
-          # Verify xcb-cursor was copied
-          if [ ! -f "usr/lib/libxcb-cursor.so.0" ]; then
-            echo "libxcb-cursor.so.0 not found, copying manually..."
-            cp -L /usr/lib/x86_64-linux-gnu/libxcb-cursor.so.0 usr/lib/ || true
-          fi
-          
-          # Verify binary still exists in correct location
-          if [ ! -f "usr/bin/artemis" ]; then
-            echo "ERROR: Binary disappeared after linuxdeployqt!"
-            ls -la usr/bin/
-            exit 1
-          fi
-          
-          # Create custom AppRun with correct path
-          cat > AppRun << 'EOFRUN'
-          #!/bin/bash
-          HERE="$(dirname "$(readlink -f "${0}")")"
-          
-          # Debug output
-          # echo "HERE: $HERE"
-          # echo "Binary path: ${HERE}/usr/bin/artemis"
-          
-          # Set library paths
-          export LD_LIBRARY_PATH="${HERE}/usr/lib:${HERE}/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}"
-          export QT_PLUGIN_PATH="${HERE}/usr/plugins:${QT_PLUGIN_PATH}"
-          export QT_QPA_PLATFORM_PLUGIN_PATH="${HERE}/usr/plugins/platforms"
-          export XDG_DATA_DIRS="${HERE}/usr/share:${XDG_DATA_DIRS}"
-          
-          # Execute the binary
-          exec "${HERE}/usr/bin/artemis" "$@"
-          EOFRUN
-          chmod +x AppRun
-          
-          # Verify AppRun exists and is executable
-          if [ ! -x "AppRun" ]; then
-            echo "ERROR: AppRun not created properly!"
-            exit 1
-          fi
-          
-          cd ..
-          
-          # Debug: Show AppDir structure
-          echo "=== AppDir structure ==="
-          ls -la AppDir/
-          echo "=== usr/bin contents ==="
-          ls -la AppDir/usr/bin/
-          echo "=== Libraries (first 20) ==="
-          find AppDir/usr/lib -name "*.so*" -type f | head -20
-          
-          # Create AppImage
-          echo "Creating AppImage..."
-          ARCH=x86_64 appimagetool AppDir "Artemis-${VERSION}-x86_64.AppImage"
-          
-          chmod +x "Artemis-${VERSION}-x86_64.AppImage"
-          
-          # Verify AppImage was created
-          if [ ! -f "Artemis-${VERSION}-x86_64.AppImage" ]; then
-            echo "ERROR: AppImage not created!"
-            exit 1
-          fi
-          
-          echo "Successfully created: Artemis-${VERSION}-x86_64.AppImage"
-          ls -lh "Artemis-${VERSION}-x86_64.AppImage"
-
-      - name: Upload AppImage
-        uses: actions/upload-artifact@v4
-        with:
-          name: artemis-appimage-${{ needs.setup-version.outputs.version }}
-          path: Artemis-${{ needs.setup-version.outputs.version }}-x86_64.AppImage
-          retention-days: 30
 
   create-release:
     name: Create Release
-    needs: [setup-version, build-linux-tarball, build-appimage]
+    needs: [setup-version, build-linux-tarball]
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || github.ref == 'refs/heads/develop'
     steps:
@@ -553,24 +343,10 @@ jobs:
             
             ### Available Downloads:
             
-            - **AppImage** (Recommended): Self-contained, runs on any Linux distribution
             - **Tarball**: Includes bundled libraries and auto-installer for Fedora
             
             ### Installation on Fedora:
             
-            **Option 1: AppImage (Easiest - No Installation)**
-            ```bash
-            # Download and make executable
-            chmod +x Artemis-*.AppImage
-            
-            # Run directly
-            ./Artemis-*.AppImage
-            
-            # Optional: Move to PATH for easy access
-            mkdir -p ~/.local/bin
-            mv Artemis-*.AppImage ~/.local/bin/artemis
-            artemis
-            ```
             
             **Option 2: Tarball (Traditional Installation)**
             ```bash
@@ -607,7 +383,6 @@ jobs:
             - OpenGL support
             - FFmpeg libraries (from RPM Fusion)
           files: |
-            artifacts/**/*.AppImage
             artifacts/**/*.tar.gz
           prerelease: ${{ github.ref != 'refs/heads/main' && github.ref != 'refs/heads/master' }}
           draft: false
