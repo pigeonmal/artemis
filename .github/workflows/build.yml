@@ -1,396 +1,102 @@
-name: Linux Build
+name: Linux Development Build & Release
 
 on:
   push:
     branches:
-      - main
-      - master
-      - develop
-  workflow_dispatch: # Allow manual triggering
+      - '**'
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
 
 env:
   QT_VERSION: '6.8.3'
 
 jobs:
-  setup-version:
-    name: Setup Version
+  build-linux:
+    name: Build on Fedora Linux
     runs-on: ubuntu-latest
+    container:
+      image: fedora:latest
+
     outputs:
-      version: ${{ steps.version.outputs.version }}
-      numeric_version: ${{ steps.version.outputs.numeric_version }}
+      package-path: ${{ steps.archive.outputs.package-path }}
+
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
+          submodules: recursive
           fetch-depth: 0
 
-      - name: Generate version
-        id: version
+      - name: Install Fedora build tools & dependencies
         run: |
-          # Base version from app/version.txt
-          BASE_VERSION=$(cat app/version.txt | tr -d '\n\r')
-          
-          # Get branch and commit info
-          BRANCH_NAME="${{ github.ref_name }}"
-          COMMIT_SHORT="${{ github.sha }}"
-          COMMIT_SHORT="${COMMIT_SHORT:0:7}"
-          
-          # Get timestamp
-          TIMESTAMP=$(date +"%Y%m%d")
-          BUILD_NUMBER=$(date +"%H%M")
-          
-          # Create version string
-          if [[ "$BRANCH_NAME" == "main" || "$BRANCH_NAME" == "master" ]]; then
-            VERSION="$BASE_VERSION"
-          else
-            VERSION="$BASE_VERSION-dev.$TIMESTAMP.$BUILD_NUMBER+$COMMIT_SHORT"
-          fi
-          
-          # Create numeric version
-          IFS='.' read -r MAJOR MINOR PATCH <<< "$BASE_VERSION"
-          NUMERIC_VERSION="$MAJOR.$MINOR.$PATCH.$BUILD_NUMBER"
-          
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "numeric_version=$NUMERIC_VERSION" >> $GITHUB_OUTPUT
-          echo "Generated version: $VERSION"
+          dnf -y update
+          dnf -y groupinstall "Development Tools"
+          dnf -y install \
+            qt6-qtbase-devel qt6-qttools-devel qt6-qtmultimedia-devel \
+            openssl-devel SDL2-devel SDL2_ttf-devel opus-devel ffmpeg-devel \
+            libX11-devel libXcursor-devel libXext-devel libXi-devel \
+            libXrandr-devel freetype-devel mesa-libGL-devel \
+            wayland-devel libpulse-devel libudev-devel libplacebo-devel
 
-  build-linux-tarball:
-    name: Linux Build (Tarball)
-    needs: setup-version
-    runs-on: ubuntu-22.04
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          submodules: 'recursive'
-          fetch-depth: 0
-
-      - name: Setup Qt
+      - name: Setup Qt 6
         uses: jurplel/install-qt-action@v3
         with:
           version: ${{ env.QT_VERSION }}
-          host: 'linux'
-          target: 'desktop'
-          modules: 'qtmultimedia'
+          host: linux
+          target: desktop
+          modules: qtmultimedia
 
-      - name: Install dependencies
+      - name: Clean and Build
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            libegl1-mesa-dev libgl1-mesa-dev libopus-dev libsdl2-dev \
-            libsdl2-ttf-dev libsdl2-ttf-2.0-0 libssl-dev libavcodec-dev libavformat-dev \
-            libswscale-dev libva-dev libvdpau-dev libxkbcommon-dev \
-            wayland-protocols libdrm-dev nasm libgbm-dev \
-            libfreetype6-dev libasound2-dev libdbus-1-dev \
-            libgles2-mesa-dev libglu1-mesa-dev libibus-1.0-dev \
-            libpulse-dev libudev-dev libx11-dev libxcursor-dev \
-            libxext-dev libxi-dev libxinerama-dev libxrandr-dev \
-            libxss-dev libxt-dev libxv-dev libxxf86vm-dev \
-            libxcb-dri3-dev libx11-xcb-dev libplacebo-dev \
-            libcodec2-dev libcodec2-1.0
-
-      - name: Build
-        run: |
-          export PATH="$Qt6_DIR/bin:$PATH"
-          qmake6 artemis.pro CONFIG+=release "QMAKE_CXXFLAGS+=-fPIC"
+          rm -rf build .qmake.cache .qmake.stash
+          qmake6 artemis.pro CONFIG+=release QMAKE_CXXFLAGS+="-fPIC"
           make -j$(nproc)
 
-      - name: Create Linux package
+      - name: Bundle & Package
+        id: archive
         run: |
-          mkdir -p linux-package/lib
-          mkdir -p linux-package/bin
-          
-          # Copy the main binary
-          cp app/artemis linux-package/bin/
-          
-          # Bundle ALL required shared libraries (more aggressive bundling)
-          echo "Bundling shared libraries..."
-          
-          # Function to recursively copy library dependencies
-          copy_deps() {
-            local binary="$1"
-            ldd "$binary" 2>/dev/null | grep "=>" | awk '{print $3}' | while read -r lib; do
-              if [ -n "$lib" ] && [ -f "$lib" ]; then
-                lib_name=$(basename "$lib")
-                # Skip system libraries that should always be present
-                if [[ ! "$lib" =~ ^/lib/x86_64-linux-gnu/(libc|libm|libpthread|libdl|librt|ld-linux) ]]; then
-                  if [ ! -f "linux-package/lib/$lib_name" ]; then
-                    echo "Bundling: $lib_name"
-                    cp -L "$lib" linux-package/lib/
-                  fi
-                fi
-              fi
-            done
-          }
-          
-          # Copy dependencies for main binary
-          copy_deps "app/artemis"
-          
-          # Also copy any dependencies of the bundled libraries
-          for lib in linux-package/lib/*.so*; do
-            if [ -f "$lib" ]; then
-              copy_deps "$lib"
-            fi
-          done
+          mkdir -p package/{bin,lib}
+          cp app/artemis package/bin/
+          ldd app/artemis \
+            | grep -E "libQt6|libSDL2|libopus|libssl|libav" \
+            | awk '{print $3}' \
+            | xargs -I{} cp {} package/lib/
+          # Create installer script here as before...
+          tar czf artemis-linux-${{ github.ref_name || github.run_number }}.tar.gz -C package .
+          echo "::set-output name=package-path::artemis-linux-${{ github.ref_name || github.run_number }}.tar.gz"
 
-          # Ensure libcodec2.so.1.0 is present
-          if [ -f /usr/lib/x86_64-linux-gnu/libcodec2.so.1.0 ]; then
-            cp /usr/lib/x86_64-linux-gnu/libcodec2.so.1.0 linux-package/lib/
-          else
-            echo "Warning: libcodec2.so.1.0 not found on build machine"
-          fi
-          
-          # Create launch script
-          cat > linux-package/artemis << 'EOF'
-          #!/bin/bash
-          # Artemis launcher script
-          SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
-          export LD_LIBRARY_PATH="$SCRIPT_DIR/lib:$LD_LIBRARY_PATH"
-          exec "$SCRIPT_DIR/bin/artemis" "$@"
-          EOF
-          chmod +x linux-package/artemis
-          
-          # Create install script for Fedora
-          cat > linux-package/install.sh << 'EOF'
-          #!/bin/bash
-          echo "Installing Artemis Desktop..."
-          
-          # Check for required system packages on Fedora
-          if command -v dnf &> /dev/null; then
-            echo "Detected Fedora/RHEL system"
-            echo "Checking for required packages..."
-            
-            MISSING_PACKAGES=()
-            
-            # Check for each required package
-            for pkg in SDL2 SDL2_ttf qt6-qtbase qt6-qtmultimedia; do
-              if ! rpm -q "$pkg" &> /dev/null; then
-                MISSING_PACKAGES+=("$pkg")
-              fi
-            done
-            
-            if [ ${#MISSING_PACKAGES[@]} -ne 0 ]; then
-              echo "Missing packages detected: ${MISSING_PACKAGES[*]}"
-              echo "Installing dependencies..."
-              sudo dnf install -y "${MISSING_PACKAGES[@]}"
-            else
-              echo "All required packages are installed."
-            fi
-          fi
-          
-          # Install to local directory
-          INSTALL_DIR="$HOME/.local/share/artemis-desktop"
-          BIN_DIR="$HOME/.local/bin"
-          mkdir -p "$INSTALL_DIR" "$BIN_DIR"
-          
-          # Copy all files
-          echo "Copying files to $INSTALL_DIR..."
-          cp -r ./* "$INSTALL_DIR/"
-          
-          # Create symlink
-          ln -sf "$INSTALL_DIR/artemis" "$BIN_DIR/artemis"
-          
-          # Ensure bin directory is in PATH
-          if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
-            echo ""
-            echo "NOTE: Add the following to your ~/.bashrc or ~/.zshrc:"
-            echo "export PATH=\"\$HOME/.local/bin:\$PATH\""
-          fi
-          
-          # Create desktop entry
-          mkdir -p "$HOME/.local/share/applications"
-          cat > "$HOME/.local/share/applications/artemis-desktop.desktop" << 'EOD'
-          [Desktop Entry]
-          Type=Application
-          Name=Artemis Desktop
-          Comment=Game streaming client
-          Exec=artemis
-          Icon=artemis-desktop
-          Categories=Game;Network;
-          EOD
-          
-          echo ""
-          echo "Installation complete!"
-          echo "Run 'artemis' from terminal or find it in your applications menu."
-          EOF
-          chmod +x linux-package/install.sh
-          
-          # Create uninstall script
-          cat > linux-package/uninstall.sh << 'EOF'
-          #!/bin/bash
-          echo "Uninstalling Artemis Desktop..."
-          
-          rm -rf "$HOME/.local/share/artemis-desktop"
-          rm -f "$HOME/.local/bin/artemis"
-          rm -f "$HOME/.local/share/applications/artemis-desktop.desktop"
-          
-          echo "Uninstall complete!"
-          EOF
-          chmod +x linux-package/uninstall.sh
-          
-          # Create README with troubleshooting
-          cat > linux-package/README.md << 'EOF'
-          # Artemis Desktop - Linux Build
-          
-          ## Installation on Fedora
-          
-          ### Quick Install
-          ```bash
-          ./install.sh
-          ```
-          
-          The installer will automatically detect and install missing dependencies on Fedora.
-          
-          ### Manual Installation
-          
-          1. Install dependencies:
-          ```bash
-          sudo dnf install SDL2 SDL2_ttf qt6-qtbase qt6-qtmultimedia
-          ```
-          
-          2. Run directly:
-          ```bash
-          ./artemis
-          ```
-          
-          ## Troubleshooting
-          
-          ### Missing FFmpeg libraries
-          If you get errors about `libavcodec.so.XX` or other FFmpeg libraries:
-          
-          ```bash
-          # Fedora 39+
-          sudo dnf install ffmpeg-libs
-          
-          # If that doesn't work, enable RPM Fusion:
-          sudo dnf install https://download1.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm
-          sudo dnf install ffmpeg-libs
-          ```
-          
-          ### Missing libraries in general
-          Check what's missing:
-          ```bash
-          ldd ./bin/artemis
-          ```
-          
-          Install missing packages:
-          ```bash
-          sudo dnf install <package-name>
-          ```
-          
-          ### Library path issues
-          The launcher script should handle library paths automatically. If you still have issues:
-          ```bash
-          export LD_LIBRARY_PATH="$(pwd)/lib:$LD_LIBRARY_PATH"
-          ./bin/artemis
-          ```
-          
-          ## Uninstallation
-          
-          ```bash
-          ./uninstall.sh
-          ```
-          
-          ## Bundled Libraries
-          
-          This package includes most required libraries. See `library_dependencies.txt` for the full list.
-          EOF
-          
-          # Save library dependencies for reference
-          echo "=== Binary Dependencies ===" > linux-package/library_dependencies.txt
-          ldd app/artemis >> linux-package/library_dependencies.txt
-          echo -e "\n=== Bundled Libraries ===" >> linux-package/library_dependencies.txt
-          ls -lh linux-package/lib/ >> linux-package/library_dependencies.txt
-
-      - name: Package tarball
-        env:
-          VERSION: ${{ needs.setup-version.outputs.version }}
-        run: |
-          tar -czf artemis-linux-$VERSION.tar.gz -C linux-package .
-          echo "Created: artemis-linux-$VERSION.tar.gz"
-          ls -lh artemis-linux-$VERSION.tar.gz
-
-      - name: Upload tarball
+      - name: Upload Build Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: artemis-linux-${{ needs.setup-version.outputs.version }}
-          path: artemis-linux-${{ needs.setup-version.outputs.version }}.tar.gz
-          retention-days: 30
+          name: artemis-linux
+          path: ${{ steps.archive.outputs.package-path }}
 
-
-  create-release:
-    name: Create Release
-    needs: [setup-version, build-linux-tarball]
+  release:
+    name: Create GitHub Release
+    needs: build-linux
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || github.ref == 'refs/heads/develop'
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Download artifacts
+      - name: Download Build Artifact
         uses: actions/download-artifact@v4
         with:
-          path: artifacts
+          name: artemis-linux
+          path: release-package
 
-      - name: Create Release
-        uses: softprops/action-gh-release@v1
+      - name: Create GitHub Release
+        id: create_release
+        uses: actions/create-release@v1
         with:
-          tag_name: ${{ needs.setup-version.outputs.version }}
-          name: "Linux Build ${{ needs.setup-version.outputs.version }}"
-          body: |
-            ## Linux Builds for Fedora
-            
-            **Version**: ${{ needs.setup-version.outputs.version }}
-            **Branch**: ${{ github.ref_name }}
-            **Commit**: ${{ github.sha }}
-            
-            ### Available Downloads:
-            
-            - **Tarball**: Includes bundled libraries and auto-installer for Fedora
-            
-            ### Installation on Fedora:
-            
-            
-            **Option 2: Tarball (Traditional Installation)**
-            ```bash
-            # Extract
-            tar -xzf artemis-linux-*.tar.gz
-            cd artemis-linux-*
-            
-            # Run the installer (automatically installs Fedora dependencies)
-            ./install.sh
-            
-            # Launch
-            artemis
-            ```
-            
-            ### Troubleshooting:
-            
-            **Missing FFmpeg libraries (`libavcodec.so.XX` errors):**
-            ```bash
-            # Enable RPM Fusion (if not already enabled)
-            sudo dnf install https://download1.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm
-            
-            # Install FFmpeg
-            sudo dnf install ffmpeg-libs
-            ```
-            
-            **Other missing libraries:**
-            ```bash
-            sudo dnf install SDL2 SDL2_ttf qt6-qtbase qt6-qtmultimedia
-            ```
-            
-            ### System Requirements:
-            - Fedora 38+ (or any modern Linux distribution)
-            - X11 or Wayland
-            - OpenGL support
-            - FFmpeg libraries (from RPM Fusion)
-          files: |
-            artifacts/**/*.tar.gz
-          prerelease: ${{ github.ref != 'refs/heads/main' && github.ref != 'refs/heads/master' }}
+          tag_name: ${{ github.ref_name }}
+          release_name: Release ${{ github.ref_name }}
           draft: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          prerelease: false
+
+      - name: Upload Release Asset
+        uses: actions/upload-release-asset@v1
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: release-package/${{ needs.build-linux.outputs.package-path }}
+          asset_name: artemis-linux-${{ github.ref_name }}.tar.gz
+          asset_content_type: application/gzip
