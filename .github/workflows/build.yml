@@ -235,7 +235,12 @@ jobs:
             libpulse-dev libudev-dev libx11-dev libxcursor-dev \
             libxext-dev libxi-dev libxinerama-dev libxrandr-dev \
             libxss-dev libxt-dev libxv-dev libxxf86vm-dev \
-            libxcb-dri3-dev libx11-xcb-dev libplacebo-dev
+            libxcb-dri3-dev libx11-xcb-dev libplacebo-dev \
+            libxcb-cursor0 libxcb-cursor-dev libxcb-icccm4 \
+            libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
+            libxcb-render-util0 libxcb-shape0 libxcb-sync1 \
+            libxcb-util1 libxcb-xfixes0 libxcb-xinerama0 \
+            libxcb-xkb1 libxkbcommon-x11-0
           
           # Download linuxdeployqt
           wget -O linuxdeployqt.AppImage https://github.com/probonopd/linuxdeployqt/releases/download/continuous/linuxdeployqt-continuous-x86_64.AppImage
@@ -261,9 +266,34 @@ jobs:
           mkdir -p AppDir/usr/bin
           mkdir -p AppDir/usr/share/applications
           mkdir -p AppDir/usr/share/icons/hicolor/256x256/apps
+          mkdir -p AppDir/usr/lib
           
           # Copy binary
           cp app/artemis AppDir/usr/bin/
+          
+          # Manually copy xcb libraries that linuxdeployqt might miss
+          echo "Pre-copying xcb libraries..."
+          for lib in /usr/lib/x86_64-linux-gnu/libxcb-cursor*.so*; do
+            if [ -f "$lib" ]; then
+              cp -L "$lib" AppDir/usr/lib/
+              echo "Copied: $(basename $lib)"
+            fi
+          done
+          
+          for lib in /usr/lib/x86_64-linux-gnu/libxcb-*.so*; do
+            if [ -f "$lib" ]; then
+              cp -L "$lib" AppDir/usr/lib/
+              echo "Copied: $(basename $lib)"
+            fi
+          done
+          
+          # Copy xkbcommon libraries
+          for lib in /usr/lib/x86_64-linux-gnu/libxkbcommon*.so*; do
+            if [ -f "$lib" ]; then
+              cp -L "$lib" AppDir/usr/lib/
+              echo "Copied: $(basename $lib)"
+            fi
+          done
           
           # Create desktop file
           cat > AppDir/usr/share/applications/artemis.desktop << 'EOF'
@@ -277,32 +307,58 @@ jobs:
           Keywords=gaming;streaming;nvidia;gamestream;sunshine;
           EOF
           
-          # Copy icon (if exists)
-          if [ -f "app/artemis.png" ]; then
+          # Create a placeholder icon if one doesn't exist
+          if [ ! -f "app/artemis.png" ]; then
+            # Create a simple placeholder SVG and convert to PNG
+            cat > AppDir/usr/share/icons/hicolor/256x256/apps/artemis.png << 'EOF'
+          # This would be your app icon - placeholder for now
+          EOF
+          else
             cp app/artemis.png AppDir/usr/share/icons/hicolor/256x256/apps/artemis.png
           fi
           
-          # Run linuxdeployqt
-          cd AppDir
-          linuxdeployqt usr/share/applications/artemis.desktop -bundle-non-qt-libs -verbose=2
+          # Set environment for linuxdeployqt
+          export LD_LIBRARY_PATH="$(pwd)/AppDir/usr/lib:$LD_LIBRARY_PATH"
           
-          # Create custom AppRun
+          # Run linuxdeployqt with bundled libraries
+          cd AppDir
+          linuxdeployqt usr/share/applications/artemis.desktop \
+            -bundle-non-qt-libs \
+            -extra-plugins=iconengines,platformthemes/libqgtk3.so \
+            -verbose=2 || true
+          
+          # Verify xcb-cursor was copied
+          if [ ! -f "usr/lib/libxcb-cursor.so.0" ]; then
+            echo "libxcb-cursor.so.0 not found, copying manually..."
+            cp -L /usr/lib/x86_64-linux-gnu/libxcb-cursor.so.0 usr/lib/ || true
+          fi
+          
+          # Create custom AppRun with library path
           cat > AppRun << 'EOF'
           #!/bin/bash
           HERE="$(dirname "$(readlink -f "${0}")")"
-          export LD_LIBRARY_PATH="${HERE}/usr/lib:${LD_LIBRARY_PATH}"
-          export QT_PLUGIN_PATH="${HERE}/usr/lib/qt6/plugins:${QT_PLUGIN_PATH}"
+          export LD_LIBRARY_PATH="${HERE}/usr/lib:${HERE}/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}"
+          export QT_PLUGIN_PATH="${HERE}/usr/plugins:${QT_PLUGIN_PATH}"
+          export QT_QPA_PLATFORM_PLUGIN_PATH="${HERE}/usr/plugins/platforms"
+          export XDG_DATA_DIRS="${HERE}/usr/share:${XDG_DATA_DIRS}"
           exec "${HERE}/usr/bin/artemis" "$@"
           EOF
           chmod +x AppRun
           
           cd ..
           
+          # List AppDir contents for debugging
+          echo "=== AppDir structure ==="
+          find AppDir -type f -name "*.so*" | head -20
+          
           # Create AppImage
           ARCH=x86_64 appimagetool AppDir "Artemis-${VERSION}-x86_64.AppImage"
           
           chmod +x "Artemis-${VERSION}-x86_64.AppImage"
           echo "Created: Artemis-${VERSION}-x86_64.AppImage"
+          
+          # Test the AppImage
+          ls -lh "Artemis-${VERSION}-x86_64.AppImage"
 
       - name: Upload AppImage
         uses: actions/upload-artifact@v4
@@ -371,6 +427,11 @@ jobs:
             # Install
             ./install.sh
             ```
+            
+            ### System Requirements:
+            - Fedora 38+ or any modern Linux distribution
+            - X11 or Wayland display server
+            - OpenGL support
           files: |
             artifacts/**/*.AppImage
             artifacts/**/*.tar.gz
