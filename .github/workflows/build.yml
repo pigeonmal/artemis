@@ -1,13 +1,14 @@
-name: Linux Build Only
+name: Linux Build (AppImage)
+
+# Workflow to build Linux artifacts with AppImage for Fedora/general Linux use
 
 on:
-  workflow_dispatch:  # Manual triggering
   push:
     branches:
-      - develop
-      - dev
       - main
       - master
+      - develop
+  workflow_dispatch: # Allow manual triggering
 
 env:
   QT_VERSION: '6.8.3'
@@ -19,66 +20,52 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       numeric_version: ${{ steps.version.outputs.numeric_version }}
-      is_prerelease: ${{ steps.version.outputs.is_prerelease }}
-      should_build: ${{ steps.check-changes.outputs.should_build }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Check for meaningful changes
-        id: check-changes
-        run: |
-          # Always build on main/master or when manually triggered
-          if [[ "${{ github.ref_name }}" == "main" || "${{ github.ref_name }}" == "master" || "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "should_build=true" >> $GITHUB_OUTPUT
-            echo "Build triggered"
-            exit 0
-          fi
-          echo "should_build=true" >> $GITHUB_OUTPUT
-
-      - name: Generate semantic version
+      - name: Generate version
         id: version
         run: |
+          # Base version from app/version.txt
           BASE_VERSION=$(cat app/version.txt | tr -d '\n\r')
+          
+          # Get branch and commit info
           BRANCH_NAME="${{ github.ref_name }}"
           COMMIT_SHORT="${{ github.sha }}"
           COMMIT_SHORT="${COMMIT_SHORT:0:7}"
+          
+          # Get timestamp
           TIMESTAMP=$(date +"%Y%m%d")
           BUILD_NUMBER=$(date +"%H%M")
-
+          
+          # Create version string
           if [[ "$BRANCH_NAME" == "main" || "$BRANCH_NAME" == "master" ]]; then
             VERSION="$BASE_VERSION"
-            IS_PRERELEASE="false"
           else
             VERSION="$BASE_VERSION-dev.$TIMESTAMP.$BUILD_NUMBER+$COMMIT_SHORT"
-            IS_PRERELEASE="true"
           fi
-
+          
+          # Create numeric version
           IFS='.' read -r MAJOR MINOR PATCH <<< "$BASE_VERSION"
           NUMERIC_VERSION="$MAJOR.$MINOR.$PATCH.$BUILD_NUMBER"
-
+          
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "numeric_version=$NUMERIC_VERSION" >> $GITHUB_OUTPUT
-          echo "is_prerelease=$IS_PRERELEASE" >> $GITHUB_OUTPUT
+          echo "Generated version: $VERSION"
 
-  build-linux-dev:
-    name: Linux Development Build
+  build-linux-tarball:
+    name: Linux Build (Tarball)
     needs: setup-version
     runs-on: ubuntu-22.04
-    if: needs.setup-version.outputs.should_build == 'true'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           submodules: 'recursive'
           fetch-depth: 0
-
-      - name: Display version info
-        run: |
-          echo "Using semantic version: ${{ needs.setup-version.outputs.version }}"
-          echo "Using numeric version: ${{ needs.setup-version.outputs.numeric_version }}"
 
       - name: Setup Qt
         uses: jurplel/install-qt-action@v3
@@ -94,9 +81,15 @@ jobs:
           sudo apt-get install -y \
             build-essential \
             libegl1-mesa-dev libgl1-mesa-dev libopus-dev libsdl2-dev \
-            libsdl2-ttf-dev libssl-dev libavcodec-dev libavformat-dev \
+            libsdl2-ttf-dev libsdl2-ttf-2.0-0 libssl-dev libavcodec-dev libavformat-dev \
             libswscale-dev libva-dev libvdpau-dev libxkbcommon-dev \
-            wayland-protocols libdrm-dev libgbm-dev libplacebo-dev
+            wayland-protocols libdrm-dev nasm libgbm-dev \
+            libfreetype6-dev libasound2-dev libdbus-1-dev \
+            libgles2-mesa-dev libglu1-mesa-dev libibus-1.0-dev \
+            libpulse-dev libudev-dev libx11-dev libxcursor-dev \
+            libxext-dev libxi-dev libxinerama-dev libxrandr-dev \
+            libxss-dev libxt-dev libxv-dev libxxf86vm-dev \
+            libxcb-dri3-dev libx11-xcb-dev libplacebo-dev
 
       - name: Build
         run: |
@@ -104,38 +97,284 @@ jobs:
           qmake6 artemis.pro CONFIG+=release "QMAKE_CXXFLAGS+=-fPIC"
           make -j$(nproc)
 
-      - name: Create dependency bundle
+      - name: Create Linux package
         run: |
           mkdir -p linux-package/lib
           mkdir -p linux-package/bin
+          
+          # Copy the main binary
           cp app/artemis linux-package/bin/
-
-          # Bundle shared libraries
-          ldd app/artemis | grep -E "(libSDL2|libopus|libssl)" | while read -r line; do
+          
+          # Bundle critical shared libraries
+          echo "Bundling SDL2 libraries..."
+          ldd app/artemis | grep -E "(libSDL2-2\.0|libSDL2_ttf|libopus)" | while read -r line; do
             lib_path=$(echo "$line" | grep -o '/[^[:space:]]*')
             if [ -n "$lib_path" ] && [ -f "$lib_path" ]; then
+              lib_name=$(basename "$lib_path")
+              echo "Bundling library: $lib_name"
               cp "$lib_path" linux-package/lib/
             fi
           done
-
-          # Create launcher script
+          
+          # Create launch script
           cat > linux-package/artemis << 'EOF'
           #!/bin/bash
+          # Artemis launcher script
           SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
           export LD_LIBRARY_PATH="$SCRIPT_DIR/lib:$LD_LIBRARY_PATH"
           exec "$SCRIPT_DIR/bin/artemis" "$@"
           EOF
           chmod +x linux-package/artemis
+          
+          # Create install script for Fedora
+          cat > linux-package/install.sh << 'EOF'
+          #!/bin/bash
+          echo "Installing Artemis Desktop..."
+          
+          # Install to local directory
+          INSTALL_DIR="$HOME/.local/share/artemis-desktop"
+          BIN_DIR="$HOME/.local/bin"
+          mkdir -p "$INSTALL_DIR" "$BIN_DIR"
+          
+          # Copy all files
+          cp -r * "$INSTALL_DIR/"
+          
+          # Create symlink
+          ln -sf "$INSTALL_DIR/artemis" "$BIN_DIR/artemis"
+          
+          # Create desktop entry
+          mkdir -p "$HOME/.local/share/applications"
+          cat > "$HOME/.local/share/applications/artemis-desktop.desktop" << 'EOD'
+          [Desktop Entry]
+          Type=Application
+          Name=Artemis Desktop
+          Comment=Game streaming client
+          Exec=artemis
+          Icon=artemis-desktop
+          Categories=Game;Network;
+          EOD
+          
+          echo "Installation complete!"
+          echo "Run 'artemis' from terminal or find it in your applications menu."
+          EOF
+          chmod +x linux-package/install.sh
+          
+          # Create README
+          cat > linux-package/README.md << 'EOF'
+          # Artemis Desktop - Linux Build
+          
+          ## Installation on Fedora
+          
+          1. Extract this archive
+          2. Install dependencies:
+          ```bash
+          sudo dnf install SDL2 SDL2_ttf opus ffmpeg-libs openssl-libs
+          ```
+          3. Run the installer: `./install.sh`
+          4. Launch: `artemis`
+          
+          ## Manual Installation
+          
+          Run directly: `./artemis`
+          
+          ## Troubleshooting
+          
+          If you encounter missing library errors, install:
+          ```bash
+          sudo dnf install SDL2 SDL2_ttf opus ffmpeg openssl
+          ```
+          EOF
+          
+          # Save library dependencies for reference
+          ldd app/artemis > linux-package/library_dependencies.txt
 
-      - name: Package Linux Build
+      - name: Package tarball
         env:
           VERSION: ${{ needs.setup-version.outputs.version }}
         run: |
           tar -czf artemis-linux-$VERSION.tar.gz -C linux-package .
+          echo "Created: artemis-linux-$VERSION.tar.gz"
 
-      - name: Upload Linux Artifact
+      - name: Upload tarball
         uses: actions/upload-artifact@v4
         with:
           name: artemis-linux-${{ needs.setup-version.outputs.version }}
           path: artemis-linux-${{ needs.setup-version.outputs.version }}.tar.gz
           retention-days: 30
+
+  build-appimage:
+    name: Linux Build (AppImage)
+    needs: setup-version
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'
+          fetch-depth: 0
+
+      - name: Setup Qt
+        uses: jurplel/install-qt-action@v3
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: 'linux'
+          target: 'desktop'
+          modules: 'qtmultimedia'
+
+      - name: Install dependencies and AppImage tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential libfuse2 fuse squashfs-tools \
+            libegl1-mesa-dev libgl1-mesa-dev libopus-dev libsdl2-dev \
+            libsdl2-ttf-dev libssl-dev libavcodec-dev libavformat-dev \
+            libswscale-dev libva-dev libvdpau-dev libxkbcommon-dev \
+            wayland-protocols libdrm-dev nasm libgbm-dev \
+            libfreetype6-dev libasound2-dev libdbus-1-dev \
+            libgles2-mesa-dev libglu1-mesa-dev libibus-1.0-dev \
+            libpulse-dev libudev-dev libx11-dev libxcursor-dev \
+            libxext-dev libxi-dev libxinerama-dev libxrandr-dev \
+            libxss-dev libxt-dev libxv-dev libxxf86vm-dev \
+            libxcb-dri3-dev libx11-xcb-dev libplacebo-dev
+          
+          # Download linuxdeployqt
+          wget -O linuxdeployqt.AppImage https://github.com/probonopd/linuxdeployqt/releases/download/continuous/linuxdeployqt-continuous-x86_64.AppImage
+          chmod +x linuxdeployqt.AppImage
+          sudo mv linuxdeployqt.AppImage /usr/local/bin/linuxdeployqt
+          
+          # Download appimagetool
+          wget -O appimagetool.AppImage https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool.AppImage
+          sudo mv appimagetool.AppImage /usr/local/bin/appimagetool
+
+      - name: Build
+        run: |
+          export PATH="$Qt6_DIR/bin:$PATH"
+          qmake6 artemis.pro CONFIG+=release "QMAKE_CXXFLAGS+=-fPIC"
+          make -j$(nproc)
+
+      - name: Create AppImage
+        env:
+          VERSION: ${{ needs.setup-version.outputs.version }}
+        run: |
+          # Create AppDir structure
+          mkdir -p AppDir/usr/bin
+          mkdir -p AppDir/usr/share/applications
+          mkdir -p AppDir/usr/share/icons/hicolor/256x256/apps
+          
+          # Copy binary
+          cp app/artemis AppDir/usr/bin/
+          
+          # Create desktop file
+          cat > AppDir/usr/share/applications/artemis.desktop << 'EOF'
+          [Desktop Entry]
+          Type=Application
+          Name=Artemis Desktop
+          Comment=Game streaming client for GameStream and Sunshine
+          Exec=artemis
+          Icon=artemis
+          Categories=Game;Network;
+          Keywords=gaming;streaming;nvidia;gamestream;sunshine;
+          EOF
+          
+          # Copy icon (if exists)
+          if [ -f "app/artemis.png" ]; then
+            cp app/artemis.png AppDir/usr/share/icons/hicolor/256x256/apps/artemis.png
+          fi
+          
+          # Run linuxdeployqt
+          cd AppDir
+          linuxdeployqt usr/share/applications/artemis.desktop -bundle-non-qt-libs -verbose=2
+          
+          # Create custom AppRun
+          cat > AppRun << 'EOF'
+          #!/bin/bash
+          HERE="$(dirname "$(readlink -f "${0}")")"
+          export LD_LIBRARY_PATH="${HERE}/usr/lib:${LD_LIBRARY_PATH}"
+          export QT_PLUGIN_PATH="${HERE}/usr/lib/qt6/plugins:${QT_PLUGIN_PATH}"
+          exec "${HERE}/usr/bin/artemis" "$@"
+          EOF
+          chmod +x AppRun
+          
+          cd ..
+          
+          # Create AppImage
+          ARCH=x86_64 appimagetool AppDir "Artemis-${VERSION}-x86_64.AppImage"
+          
+          chmod +x "Artemis-${VERSION}-x86_64.AppImage"
+          echo "Created: Artemis-${VERSION}-x86_64.AppImage"
+
+      - name: Upload AppImage
+        uses: actions/upload-artifact@v4
+        with:
+          name: artemis-appimage-${{ needs.setup-version.outputs.version }}
+          path: Artemis-${{ needs.setup-version.outputs.version }}-x86_64.AppImage
+          retention-days: 30
+
+  create-release:
+    name: Create Release
+    needs: [setup-version, build-linux-tarball, build-appimage]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || github.ref == 'refs/heads/develop'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ needs.setup-version.outputs.version }}
+          name: "Linux Build ${{ needs.setup-version.outputs.version }}"
+          body: |
+            ## Linux Builds
+            
+            **Version**: ${{ needs.setup-version.outputs.version }}
+            **Branch**: ${{ github.ref_name }}
+            **Commit**: ${{ github.sha }}
+            
+            ### Available Downloads:
+            
+            - **AppImage** (Recommended for Fedora): Run on any Linux distribution
+            - **Tarball**: Manual installation with bundled libraries
+            
+            ### Installation on Fedora:
+            
+            **Option 1: AppImage (Easiest)**
+            ```bash
+            # Make it executable
+            chmod +x Artemis-*.AppImage
+            
+            # Run directly
+            ./Artemis-*.AppImage
+            
+            # Or integrate into system (optional)
+            mkdir -p ~/.local/bin
+            mv Artemis-*.AppImage ~/.local/bin/artemis
+            ```
+            
+            **Option 2: Tarball**
+            ```bash
+            # Extract
+            tar -xzf artemis-linux-*.tar.gz
+            cd artemis-linux-*
+            
+            # Install dependencies
+            sudo dnf install SDL2 SDL2_ttf opus ffmpeg-libs openssl-libs
+            
+            # Install
+            ./install.sh
+            ```
+          files: |
+            artifacts/**/*.AppImage
+            artifacts/**/*.tar.gz
+          prerelease: ${{ github.ref != 'refs/heads/main' && github.ref != 'refs/heads/master' }}
+          draft: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
