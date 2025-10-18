@@ -88,7 +88,7 @@ jobs:
             libxext-dev libxi-dev libxinerama-dev libxrandr-dev \
             libxss-dev libxt-dev libxv-dev libxxf86vm-dev \
             libxcb-dri3-dev libx11-xcb-dev libplacebo-dev \
-            libcodec2-dev
+            libcodec2-dev libcodec2-1.0
 
       - name: Build
         run: |
@@ -198,10 +198,9 @@ jobs:
           Type=Application
           Name=Artemis Desktop
           Comment=Game streaming client
-          Exec=$HOME/.local/bin/artemis
+          Exec=artemis
           Icon=artemis-desktop
           Categories=Game;Network;
-          Terminal=false
           EOD
           
           echo ""
